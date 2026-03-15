@@ -3,7 +3,7 @@ import pandas as pd
 import yfinance as yf
 from edgar import set_identity, Company
 
-set_identity("your-email@example.com")  # Replace with your own email address
+set_identity("daniellandy1@gmail.com")
 
 ANNUAL_FORMS = {"10-K", "10-K405", "10-KSB", "20-F", "20-F/A"}
 
@@ -277,11 +277,26 @@ def _build_from_concepts(df_annual, concepts: dict, ifrs_concepts: dict = None) 
             prefixed += [f"ifrs-full:{c}" for c in ifrs_concepts[metric]]
         sub = df_annual[df_annual["concept"].isin(prefixed)].copy()
         if not sub.empty:
+            concept_priority = {c: i for i, c in enumerate(prefixed)}
+            sub["_priority"] = sub["concept"].map(concept_priority)
             sub["fact"] = metric
             frames.append(sub)
     if not frames:
         return pd.DataFrame()
     combined = pd.concat(frames, ignore_index=True)
+
+    # Prefer higher-priority concepts (earlier in candidate list) over later ones.
+    # This prevents a small sub-revenue concept filed later from overriding the
+    # correct total revenue concept (e.g. GOGO: "Revenues" vs a minor sub-concept).
+    combined["_year_bucket"] = pd.to_datetime(combined["period_end"]).dt.year
+    # Within each (fact, year, priority), keep the most recent filing
+    combined = (combined.sort_values("filing_date")
+                .drop_duplicates(subset=["fact", "_year_bucket", "_priority"], keep="last"))
+    # Among priorities, prefer the highest-priority concept (lowest index)
+    combined = (combined.sort_values("_priority")
+                .drop_duplicates(subset=["fact", "_year_bucket"], keep="first"))
+    combined = combined.drop(columns=["_year_bucket", "_priority"])
+
     pivot = _dedup_and_pivot(combined, list(concepts.keys()))
     pivot.index.name = "period_end"
     pivot.reset_index(inplace=True)
