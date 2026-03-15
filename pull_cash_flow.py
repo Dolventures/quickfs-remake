@@ -612,12 +612,18 @@ def compute_summary_metrics(income_df, bs_df, cf_df, ttm, ticker):
         info        = yf.Ticker(ticker).info
         market_cap  = info.get("marketCap") or None
         share_price = info.get("currentPrice") or info.get("regularMarketPrice") or None
+        beta        = info.get("beta") or None
+        avg_vol     = info.get("averageVolume") or None
+        shares_out  = info.get("sharesOutstanding") or None
+        share_turnover = (avg_vol * 252 / shares_out) if (avg_vol and shares_out) else None
     except Exception:
-        market_cap = share_price = None
+        market_cap = share_price = beta = share_turnover = None
 
     result = {
-        "market_cap":  market_cap,
-        "share_price": share_price,
+        "market_cap":     market_cap,
+        "share_price":    share_price,
+        "beta":           beta,
+        "share_turnover": share_turnover,
     }
 
     # FCF yields (use TTM FCF if available, else latest annual)

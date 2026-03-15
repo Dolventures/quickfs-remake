@@ -438,6 +438,14 @@
         <div class="header-stat-label">Enterprise Value</div>
         <div class="header-stat-value" id="header-ev">—</div>
       </div>
+      <div class="header-stat">
+        <div class="header-stat-label">Beta</div>
+        <div class="header-stat-value" id="header-beta">—</div>
+      </div>
+      <div class="header-stat">
+        <div class="header-stat-label">Share Turnover</div>
+        <div class="header-stat-value" id="header-turnover">—</div>
+      </div>
     </div>
     <div class="scale-toggle" id="scale-toggle" style="display:none">
       <span class="scale-toggle-label">$</span>
@@ -755,7 +763,9 @@
       document.getElementById("header-symbol").textContent = ticker;
       document.getElementById("header-price").textContent  = price  != null ? "$" + price.toFixed(2) : "—";
       document.getElementById("header-mktcap").textContent = mktCap != null ? fmtDollar(mktCap)      : "—";
-      document.getElementById("header-ev").textContent     = ev     != null ? fmtDollar(ev)           : "—";
+      document.getElementById("header-ev").textContent       = ev                        != null ? fmtDollar(ev)                               : "—";
+      document.getElementById("header-beta").textContent     = summary.beta              != null ? summary.beta.toFixed(2) + "x"                 : "—";
+      document.getElementById("header-turnover").textContent = summary.share_turnover    != null ? summary.share_turnover.toFixed(2) + "x"          : "—";
       document.getElementById("header-ticker").classList.add("visible");
     }
 
