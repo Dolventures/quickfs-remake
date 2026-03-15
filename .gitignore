@@ -1,0 +1,22 @@
+# Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Output files (generated when running the CLI)
+*.csv
+
+# Mac system files
+.DS_Store
+
+# Editor folders
+.vscode/
+.idea/

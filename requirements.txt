@@ -1,0 +1,5 @@
+flask
+edgartools
+yfinance
+pandas
+numpy
