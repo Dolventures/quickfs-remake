@@ -12,6 +12,14 @@ CASH_FLOW_CONCEPTS = {
     "NetCashProvidedByUsedInInvestingActivities": "InvestingCF",
     "NetCashProvidedByUsedInFinancingActivities": "FinancingCF",
     "PaymentsToAcquirePropertyPlantAndEquipment": "CapEx",
+    "ShareBasedCompensation":                     "StockBasedCompensation",
+    "AllocatedShareBasedCompensationExpense":      "StockBasedCompensation",
+    "PaymentsToAcquireBusinessesNetOfCashAcquired": "Acquisitions",
+    "PaymentsToAcquireBusinessesGross":            "Acquisitions",
+    "PaymentsForRepurchaseOfCommonStock":          "ShareRepurchases",
+    "PaymentsForRepurchaseOfEquity":               "ShareRepurchases",
+    "PaymentsOfDividends":                         "DividendsPaid",
+    "PaymentsOfDividendsCommonStock":              "DividendsPaid",
 }
 
 # IFRS equivalents for cash flow (ifrs-full: prefix)
@@ -23,6 +31,11 @@ CASH_FLOW_CONCEPTS_IFRS = {
     "PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities": "CapEx",
     "AcquisitionOfPropertyPlantAndEquipment":                             "CapEx",
     "PurchaseOfPropertyPlantAndEquipment":                                "CapEx",
+    "AdjustmentsForSharebasedPayments":                                   "StockBasedCompensation",
+    "CashFlowsFromUsedInAcquiringControlOfSubsidiariesOrOtherBusinesses": "Acquisitions",
+    "PaymentsToAcquireOrRedeemEntitysShares":                             "ShareRepurchases",
+    "DividendsPaidClassifiedAsFinancingActivities":                        "DividendsPaid",
+    "DividendsPaid":                                                       "DividendsPaid",
 }
 
 INCOME_CONCEPTS = {
@@ -444,7 +457,8 @@ def _compute_ttm(raw: pd.DataFrame,
 
     # ── Cash flow TTM ─────────────────────────────────────────────────────────
     cf = {}
-    for metric in ["OperatingCF", "InvestingCF", "FinancingCF", "CapEx"]:
+    for metric in ["OperatingCF", "InvestingCF", "FinancingCF", "CapEx",
+                   "StockBasedCompensation", "Acquisitions", "ShareRepurchases", "DividendsPaid"]:
         cf[metric] = ttm(annual_cf.get(metric),
                          curr_ytd.get(metric),
                          prior_ytd.get(metric))
@@ -569,7 +583,16 @@ def fetch_all_financials(ticker: str):
         raise ValueError(f"No cash flow data found for ticker: {ticker}")
 
     cf_df["fact"] = cf_df["concept"].map(cf_lookup)
-    cf_pivot_full = _dedup_and_pivot(cf_df, list(CASH_FLOW_CONCEPTS.values()))
+    # Priority dedup: earlier concept in CASH_FLOW_CONCEPTS wins over later ones
+    _cf_priority = {v: i for i, v in enumerate(cf_lookup.keys())}
+    cf_df["_priority"] = cf_df["concept"].map(_cf_priority)
+    cf_df["_year_bucket"] = cf_df["period_end"].dt.year
+    cf_df = (cf_df.sort_values("filing_date")
+             .drop_duplicates(subset=["fact", "_year_bucket", "_priority"], keep="last"))
+    cf_df = (cf_df.sort_values("_priority")
+             .drop_duplicates(subset=["fact", "_year_bucket"], keep="first"))
+    cf_df = cf_df.drop(columns=["_priority", "_year_bucket"])
+    cf_pivot_full = _dedup_and_pivot(cf_df, list(dict.fromkeys(CASH_FLOW_CONCEPTS.values())))
     cf_pivot_full.index.name = "period_end"
     cf_pivot_full.reset_index(inplace=True)
     has_capex = cf_pivot_full["CapEx"].notna()

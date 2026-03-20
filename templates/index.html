@@ -308,7 +308,7 @@
     }
 
     tbody tr:hover td:first-child { background: #fafbfc; }
-    tbody tr.separator-row td:first-child { font-weight: 600; color: #1e293b; }
+    tbody tr.separator-row td { font-weight: 600; color: #1e293b; }
 
     .positive { color: inherit; }
     .negative { color: inherit; }
@@ -504,10 +504,15 @@
     ];
 
     const CF_METRICS = [
-      { key: "OperatingCF",  label: "Operating Cash Flow", fmt: "dollar" },
-      { key: "InvestingCF",  label: "Investing Cash Flow", fmt: "dollar" },
-      { key: "FinancingCF",  label: "Financing Cash Flow", fmt: "dollar" },
-      { key: "FreeCashFlow", label: "Free Cash Flow",      fmt: "dollar" },
+      { key: "StockBasedCompensation", label: "Stock-Based Compensation", fmt: "dollar" },
+      { key: "OperatingCF",            label: "Operating Cash Flow",      fmt: "dollar", sep: true },
+      { key: "CapEx",                  label: "Capital Expenditures",     fmt: "dollar" },
+      { key: "Acquisitions",           label: "Acquisitions",             fmt: "dollar" },
+      { key: "InvestingCF",            label: "Investing Cash Flow",      fmt: "dollar", sep: true },
+      { key: "ShareRepurchases",       label: "Share Repurchases",        fmt: "dollar" },
+      { key: "DividendsPaid",          label: "Dividends Paid",           fmt: "dollar" },
+      { key: "FinancingCF",            label: "Financing Cash Flow",      fmt: "dollar", sep: true },
+      { key: "FreeCashFlow",           label: "Free Cash Flow",           fmt: "dollar", sep: true },
     ];
 
     const VALUATION_METRICS = [
