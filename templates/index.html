@@ -741,8 +741,8 @@
           </thead>
           <tbody id="ib-table-body">
             <tr>
-              <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #94a3b8;">
-                No insider trade records found. Click "Fetch &amp; Sync Trades" to query the SEC database.
+              <td colspan="11" class="empty-state" style="text-align: center; padding: 42px; color: #94a3b8;">
+                Adjust the filters above and click "Apply Filters" to search and analyze SEC Form 4 insider purchases.
               </td>
             </tr>
           </tbody>
@@ -1272,7 +1272,6 @@
         document.getElementById("search-form").style.display = "none";
         
         initIbDate();
-        fetchInsiderBuys();
       }
     }
 
@@ -1388,6 +1387,7 @@
         document.getElementById("ib-date").value = dateParam;
       }
       switchTab("insider-buys");
+      fetchInsiderBuys();
     }
   </script>
 
