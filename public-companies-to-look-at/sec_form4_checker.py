@@ -238,94 +238,30 @@ def build_email(results: list[dict], start: date, end: date) -> tuple[str, str, 
         html = f"<p>{text}</p>"
         return subject, html, text
 
-    # Group by ticker
-    grouped: dict[str, dict] = {}
-    for r in results:
-        t = r["ticker"]
-        if t not in grouped:
-            grouped[t] = {
-                "ticker":       t,
-                "issuer_name":  r["issuer_name"],
-                "market_cap":   r.get("market_cap"),
-                "total_shares": 0.0,
-                "total_value":  0.0,
-                "insiders":     [],
-                "filing_urls":  [],
-            }
-        g = grouped[t]
-        g["total_shares"] += r["shares"]
-        g["total_value"]  += r["total_value"]
-        insider_label = f"{r['insider_name']} ({r['insider_title']})"
-        if insider_label not in g["insiders"]:
-            g["insiders"].append(insider_label)
-        url = r.get("filing_url", "")
-        if url and url not in g["filing_urls"]:
-            g["filing_urls"].append(url)
+    link_url = f"https://tickerfs.com/?tab=insider-buys&date={start.isoformat()}"
 
-    rows = sorted(grouped.values(), key=lambda x: x["total_value"], reverse=True)
-
-    rows_html = ""
-    rows_text = []
-    for idx, g in enumerate(rows, 1):
-        cap_str = f"${g['market_cap'] / 1e6:.0f}M" if g.get("market_cap") else "N/A"
-
-        # Ticker cell: link each filing separately if multiple
-        urls = g["filing_urls"]
-        if len(urls) == 0:
-            ticker_cell = f'<b>{g["ticker"]}</b>'
-        elif len(urls) == 1:
-            ticker_cell = f'<a href="{urls[0]}"><b>{g["ticker"]}</b></a>'
-        else:
-            links = " ".join(
-                f'<a href="{u}">[{i+1}]</a>' for i, u in enumerate(urls)
-            )
-            ticker_cell = f'<b>{g["ticker"]}</b> {links}'
-
-        insiders_cell = "<br>".join(g["insiders"])
-        rows_html += f"""
-        <tr>
-          <td style="text-align:center">{idx}</td>
-          <td>{g['issuer_name']}</td>
-          <td>{ticker_cell}</td>
-          <td>{cap_str}</td>
-          <td>{insiders_cell}</td>
-          <td style="text-align:right">{g['total_shares']:,.0f}</td>
-          <td style="text-align:right"><b>${g['total_value']:,.0f}</b></td>
-        </tr>"""
-
-        filing_links = "  ".join(urls)
-        rows_text.append(
-            f"  {idx:>3}. {g['ticker']:8s} {g['issuer_name'][:35]:35s} ${g['total_value']:>12,.0f}"
-            + (f"\n       {filing_links}" if filing_links else "")
-        )
-
+    # Simple email prompting the user to view results on their dashboard
     html = f"""<!DOCTYPE html>
 <html>
-<body style="font-family:Arial,sans-serif;font-size:14px">
-<h2>SEC Form 4 Insider Purchases — {date_label}</h2>
-<p>Companies with market cap &lt; $2B | Transaction code <b>P</b> (open-market buy) | {len(rows)} company/companies</p>
-<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%">
-<thead style="background:#f0f0f0">
-  <tr>
-    <th>#</th><th>Company</th><th>Ticker</th><th>Mkt Cap</th>
-    <th>Insider(s)</th><th>Total Shares</th><th>Total Value</th>
-  </tr>
-</thead>
-<tbody>{rows_html}</tbody>
-</table>
-<p style="color:gray;font-size:12px">
-  Data sourced from SEC EDGAR. Market cap from Yahoo Finance.
-  This is not investment advice.
-</p>
+<body style="font-family:Arial,sans-serif;font-size:14px;color:#0f172a;line-height:1.5;">
+  <h2>SEC Form 4 Insider Purchases</h2>
+  <p>We detected <b>{len(results)}</b> qualifying insider open-market purchases (code P) on <b>{date_label}</b>.</p>
+  <p>To preserve privacy and keep code history clean, you can view the complete list and run full financial statement analysis directly on your site:</p>
+  <p style="margin: 20px 0;">
+    <a href="{link_url}" style="display:inline-block;padding:10px 20px;background-color:#2563eb;color:#ffffff;text-decoration:none;border-radius:4px;font-weight:bold;font-size:13px;">View Insider Purchases on TickerFS</a>
+  </p>
+  <p style="color:#64748b;font-size:12px;margin-top:40px;">
+    Data sourced from SEC EDGAR.
+  </p>
 </body>
 </html>"""
 
     text = (
-        f"SEC Form 4 Insider Purchases — {date_label}\n"
-        f"Companies <$2B market cap | Code P (open-market buy) | {len(rows)} company/companies\n\n"
-        f"{'Ticker':8s} {'Company':35s} {'Total Bought':>12s}\n"
-        + "-" * 60 + "\n"
-        + "\n".join(rows_text)
+        f"SEC Form 4 Insider Purchases — {date_label}\n\n"
+        f"We detected {len(results)} qualifying insider purchases on this date.\n\n"
+        f"View the complete list and run financial analysis directly on TickerFS:\n"
+        f"{link_url}\n\n"
+        f"Data sourced from SEC EDGAR."
     )
 
     return subject, html, text

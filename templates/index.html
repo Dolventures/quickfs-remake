@@ -1377,6 +1377,18 @@
 
     // Initial load
     renderHistory();
+
+    // Check URL parameters on page load
+    const urlParams = new URLSearchParams(window.location.search);
+    const tabParam = urlParams.get("tab");
+    const dateParam = urlParams.get("date");
+    
+    if (tabParam === "insider-buys") {
+      if (dateParam) {
+        document.getElementById("ib-date").value = dateParam;
+      }
+      switchTab("insider-buys");
+    }
   </script>
 
 </body>
