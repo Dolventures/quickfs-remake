@@ -47,33 +47,52 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 
 def fetch_form4_filings(target_date: date) -> list[dict]:
     """
-    Return all Form 4 filings for target_date using edgartools index downloads.
-    Avoids efts.sec.gov search-index which blocks cloud hosting IPs.
+    Return all Form 4 filings for target_date by parsing the daily index file directly.
+    Bypasses efts.sec.gov and edgartools index downloads which trigger 403 Forbidden in production.
     """
-    from edgar import get_filings, set_identity
-    
-    set_identity(os.getenv("EDGAR_USER_AGENT", "TickerFS contact@historysbestsellers.com"))
     date_str = target_date.strftime("%Y-%m-%d")
+    date_nodash = target_date.strftime("%Y%m%d")
+    year = target_date.year
+    qtr = (target_date.month - 1) // 3 + 1
+    
+    url = f"https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{qtr}/form.{date_nodash}.idx"
+    log.info("Fetching daily form index from %s", url)
     
     try:
-        filings = get_filings(filing_date=date_str, form="4")
-        if not filings:
-            log.info("No Form 4 filings found for %s", date_str)
+        resp = requests.get(url, headers=EDGAR_HEADERS, timeout=30)
+        if resp.status_code == 404:
+            log.info("Daily form index not found (404) for %s", date_str)
             return []
-            
-        results = []
-        for filing in filings:
-            results.append({
-                "adsh": filing.accession_no,
-                "cik": str(filing.cik),
-                "filing_url": filing.homepage_url,
-                "filing_obj": filing
-            })
-            
-        log.info("Found %d Form 4 filings for %s", len(results), date_str)
-        return results
+        resp.raise_for_status()
+        
+        lines = resp.text.splitlines()
+        filings = []
+        header_ended = False
+        for line in lines:
+            if not header_ended:
+                if line.startswith("---"):
+                    header_ended = True
+                continue
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+            if parts[0] == "4":
+                file_name = parts[-1]
+                cik = parts[-3]
+                accession = file_name.split("/")[-1].replace(".txt", "")
+                company_name = line[12:74].strip()
+                
+                filings.append({
+                    "adsh": accession,
+                    "cik": cik,
+                    "company_name": company_name,
+                    "raw_url": "https://www.sec.gov/Archives/" + file_name,
+                    "filing_url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession}-index.html"
+                })
+        log.info("Found %d Form 4 filings for %s", len(filings), date_str)
+        return filings
     except Exception as e:
-        log.error("Failed to fetch Form 4 filings via edgartools: %s", e)
+        log.error("Failed to parse daily form index for %s: %s", date_str, e)
         return []
 
 
@@ -227,9 +246,16 @@ def process_date(target_date: date, seen_tickers: dict, strict: bool = True) -> 
         log.info("[%s %d/%d] %s", target_date, i + 1, len(filings), filing["adsh"])
 
         try:
-            xml_text = filing["filing_obj"].xml()
+            txt_resp = requests.get(filing["raw_url"], headers=EDGAR_HEADERS, timeout=15)
+            txt_resp.raise_for_status()
+            txt_content = txt_resp.text
+            
+            if "<ownershipDocument>" in txt_content:
+                xml_text = "<ownershipDocument>" + txt_content.split("<ownershipDocument>")[1].split("</ownershipDocument>")[0] + "</ownershipDocument>"
+            else:
+                xml_text = None
         except Exception as e:
-            log.warning("Could not download XML for filing %s: %s", filing["adsh"], e)
+            log.warning("Could not download raw text filing for %s: %s", filing["adsh"], e)
             xml_text = None
 
         if not xml_text:
