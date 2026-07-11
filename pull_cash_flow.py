@@ -265,15 +265,40 @@ def _filter_annual_instant(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["period_start"].isna()].copy()
 
 
-def _dedup_and_pivot(df: pd.DataFrame, fact_cols: list) -> pd.DataFrame:
+def _filter_quarterly_flow(df: pd.DataFrame) -> pd.DataFrame:
+    # Include 10-Q and 10-K (for Q4/Annual)
+    forms = ANNUAL_FORMS | {"10-Q", "10-Q/A"}
+    df = _prep_dates(df[df["form_type"].isin(forms)])
+    days = (df["period_end"] - df["period_start"]).dt.days
+    # Filter for ~3, ~6, ~9, or ~12 months
+    # (Q1/3m, Q2_YTD/6m, Q3_YTD/9m, Annual/12m)
+    return df[(days >= 80) & (days <= 400)].copy()
+
+
+def _filter_quarterly_instant(df: pd.DataFrame) -> pd.DataFrame:
+    forms = ANNUAL_FORMS | {"10-Q", "10-Q/A"}
+    df = _prep_dates(df[df["form_type"].isin(forms)])
+    return df[df["period_start"].isna()].copy()
+
+
+def _dedup_and_pivot(df: pd.DataFrame, fact_cols: list, frequency: str = "annual") -> pd.DataFrame:
     df = df.copy()
-    df["year_bucket"] = df["period_end"].dt.year
+    if df.empty:
+        return pd.DataFrame(columns=fact_cols)
+
+    if frequency == "annual":
+        df["bucket"] = df["period_end"].dt.year
+    else:
+        # Use Period for quarterly bucketing to handle slight date shifts
+        df["bucket"] = df["period_end"].dt.to_period("Q")
+
     df = (
         df.sort_values("filing_date")
-        .drop_duplicates(subset=["fact", "year_bucket"], keep="last")
+        .drop_duplicates(subset=["fact", "bucket"], keep="last")
     )
-    canonical_end = df.groupby("year_bucket")["period_end"].max()
-    df["period_end"] = df["year_bucket"].map(canonical_end)
+    canonical_end = df.groupby("bucket")["period_end"].max()
+    if not canonical_end.empty:
+        df["period_end"] = df["bucket"].map(canonical_end)
     pivot = df.pivot(index="period_end", columns="fact", values="numeric_value")
     pivot = pivot.sort_index()
     for col in fact_cols:
@@ -282,13 +307,96 @@ def _dedup_and_pivot(df: pd.DataFrame, fact_cols: list) -> pd.DataFrame:
     return pivot[fact_cols]
 
 
-def _build_from_concepts(df_annual, concepts: dict, ifrs_concepts: dict = None) -> pd.DataFrame:
+def _derive_quarterly_flow(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Derives missing 3-month values (especially Q4) from YTD values.
+    Expects df with columns: fact, period_start, period_end, numeric_value, filing_date
+    """
+    if df.empty:
+        return df
+    
+    # Ensure datetimes
+    df = df.copy()
+    df["period_start"] = pd.to_datetime(df["period_start"])
+    df["period_end"] = pd.to_datetime(df["period_end"])
+    
+    # Instant data (Balance Sheet) has no period_start; no derivation possible/needed
+    if df["period_start"].isnull().all():
+        return df
+    
+    # Sort for consistent processing
+    df = df.sort_values(["fact", "period_start", "period_end", "filing_date"])
+    
+    final_records = []
+    
+    for fact, f_df in df.groupby("fact"):
+        f_df = f_df.copy()
+        f_df["days"] = (f_df["period_end"] - f_df["period_start"]).dt.days
+        
+        # Identify explicit 3m records
+        explicit_3m = f_df[(f_df["days"] >= 80) & (f_df["days"] <= 105)].copy()
+        
+        # Identify YTD records (3m, 6m, 9m, 12m)
+        # Group by period_start (fiscal year start)
+        for p_start, g in f_df.groupby("period_start"):
+            # Best value for each period_end
+            g = g.sort_values("filing_date").drop_duplicates("period_end", keep="last")
+            
+            ytd = {} # duration_bin -> (value, period_end, row)
+            for _, row in g.iterrows():
+                d = row["days"]
+                if 80 <= d <= 105:   ytd[3] = (row["numeric_value"], row["period_end"], row)
+                elif 160 <= d <= 200: ytd[6] = (row["numeric_value"], row["period_end"], row)
+                elif 250 <= d <= 300: ytd[9] = (row["numeric_value"], row["period_end"], row)
+                elif 340 <= d <= 400: ytd[12] = (row["numeric_value"], row["period_end"], row)
+            
+            # Now derive missing quarters
+            # Q2 = 6m - 3m
+            if 6 in ytd and 3 in ytd:
+                val6, end6, row6 = ytd[6]
+                val3, end3, row3 = ytd[3]
+                if explicit_3m[explicit_3m["period_end"] == end6].empty:
+                    new_row = row6.copy()
+                    new_row["numeric_value"] = val6 - val3
+                    # Set period_start to ~90 days before period_end to mark it as 3m
+                    new_row["period_start"] = end6 - pd.DateOffset(days=90)
+                    explicit_3m = pd.concat([explicit_3m, pd.DataFrame([new_row])], ignore_index=True)
+            
+            # Q3 = 9m - 6m
+            if 9 in ytd and 6 in ytd:
+                val9, end9, row9 = ytd[9]
+                val6, end6, row6 = ytd[6]
+                if explicit_3m[explicit_3m["period_end"] == end9].empty:
+                    new_row = row9.copy()
+                    new_row["numeric_value"] = val9 - val6
+                    new_row["period_start"] = end9 - pd.DateOffset(days=90)
+                    explicit_3m = pd.concat([explicit_3m, pd.DataFrame([new_row])], ignore_index=True)
+
+            # Q4 = 12m - 9m
+            if 12 in ytd and 9 in ytd:
+                val12, end12, row12 = ytd[12]
+                val9, end9, row9 = ytd[9]
+                if explicit_3m[explicit_3m["period_end"] == end12].empty:
+                    new_row = row12.copy()
+                    new_row["numeric_value"] = val12 - val9
+                    new_row["period_start"] = end12 - pd.DateOffset(days=90)
+                    explicit_3m = pd.concat([explicit_3m, pd.DataFrame([new_row])], ignore_index=True)
+
+        final_records.append(explicit_3m)
+        
+    if not final_records:
+        return pd.DataFrame()
+        
+    return pd.concat(final_records, ignore_index=True)
+
+
+def _build_from_concepts(df_raw, concepts: dict, ifrs_concepts: dict = None, frequency: str = "annual") -> pd.DataFrame:
     frames = []
     for metric, candidates in concepts.items():
         prefixed = [f"us-gaap:{c}" for c in candidates]
         if ifrs_concepts and metric in ifrs_concepts:
             prefixed += [f"ifrs-full:{c}" for c in ifrs_concepts[metric]]
-        sub = df_annual[df_annual["concept"].isin(prefixed)].copy()
+        sub = df_raw[df_raw["concept"].isin(prefixed)].copy()
         if not sub.empty:
             concept_priority = {c: i for i, c in enumerate(prefixed)}
             sub["_priority"] = sub["concept"].map(concept_priority)
@@ -298,19 +406,27 @@ def _build_from_concepts(df_annual, concepts: dict, ifrs_concepts: dict = None) 
         return pd.DataFrame()
     combined = pd.concat(frames, ignore_index=True)
 
-    # Prefer higher-priority concepts (earlier in candidate list) over later ones.
-    # This prevents a small sub-revenue concept filed later from overriding the
-    # correct total revenue concept (e.g. GOGO: "Revenues" vs a minor sub-concept).
-    combined["_year_bucket"] = pd.to_datetime(combined["period_end"]).dt.year
-    # Within each (fact, year, priority), keep the most recent filing
-    combined = (combined.sort_values("filing_date")
-                .drop_duplicates(subset=["fact", "_year_bucket", "_priority"], keep="last"))
-    # Among priorities, prefer the highest-priority concept (lowest index)
-    combined = (combined.sort_values("_priority")
-                .drop_duplicates(subset=["fact", "_year_bucket"], keep="first"))
-    combined = combined.drop(columns=["_year_bucket", "_priority"])
+    if frequency == "annual":
+        combined["_bucket"] = pd.to_datetime(combined["period_end"]).dt.year
+        # Within each (fact, bucket, priority), keep the most recent filing
+        combined = (combined.sort_values("filing_date")
+                    .drop_duplicates(subset=["fact", "_bucket", "_priority"], keep="last"))
+        # Among priorities, prefer the highest-priority concept
+        combined = (combined.sort_values("_priority")
+                    .drop_duplicates(subset=["fact", "_bucket"], keep="first"))
+        combined = combined.drop(columns=["_bucket", "_priority"])
+    else:
+        # Quarterly: Need to preserve multiple durations for derivation
+        # Within each (fact, period_start, period_end, priority), keep the most recent filing
+        combined = (combined.sort_values("filing_date")
+                    .drop_duplicates(subset=["fact", "period_start", "period_end", "_priority"], keep="last"))
+        # Among priorities, prefer the highest-priority concept
+        combined = (combined.sort_values("_priority")
+                    .drop_duplicates(subset=["fact", "period_start", "period_end"], keep="first"))
+        
+        combined = _derive_quarterly_flow(combined)
 
-    pivot = _dedup_and_pivot(combined, list(concepts.keys()))
+    pivot = _dedup_and_pivot(combined, list(concepts.keys()), frequency=frequency)
     pivot.index.name = "period_end"
     pivot.reset_index(inplace=True)
     return pivot
@@ -516,100 +632,133 @@ def _compute_ttm(raw: pd.DataFrame,
     }
 
 
+def _post_process_pivots(income_pivot, bs_pivot, cf_pivot_full, frequency: str = "annual"):
+    # ── Income statement post-processing ──────────────────────────────────────
+    if not income_pivot.empty:
+        # Fix DilutedShares unit inconsistency
+        if "DilutedShares" in income_pivot.columns:
+            shares = income_pivot["DilutedShares"].dropna()
+            if len(shares) >= 2:
+                median_shares = shares.median()
+                mask = income_pivot["DilutedShares"] < (median_shares * 0.01)
+                income_pivot.loc[mask, "DilutedShares"] *= 1000
+
+        income_pivot["GrossMargin"] = (
+            (income_pivot.get("Revenue", 0) - income_pivot.get("CostOfSales", 0))
+            / income_pivot.get("Revenue", np.nan) * 100
+        )
+        income_pivot["OperatingMargin"] = (
+            income_pivot.get("OperatingIncome", 0) / income_pivot.get("Revenue", np.nan) * 100
+        )
+        income_pivot["EBITDA"] = income_pivot.get("OperatingIncome", 0) + income_pivot.get("DA", 0)
+        income_pivot["EBITDAMargin"] = income_pivot.get("EBITDA", 0) / income_pivot.get("Revenue", np.nan) * 100
+
+        income_pivot = income_pivot.sort_values("period_end").reset_index(drop=True)
+        if frequency == "quarterly":
+            # YoY growth for quarterly: pct_change(4) assumes 4 quarters per year
+            income_pivot["RevenueGrowth"] = income_pivot["Revenue"].pct_change(4) * 100
+            income_pivot["OperatingIncomeGrowth"] = income_pivot["OperatingIncome"].pct_change(4) * 100
+        else:
+            income_pivot["RevenueGrowth"] = income_pivot["Revenue"].pct_change() * 100
+            income_pivot["OperatingIncomeGrowth"] = income_pivot["OperatingIncome"].pct_change() * 100
+
+    # ── Balance sheet post-processing ─────────────────────────────────────────
+    if not bs_pivot.empty:
+        if "TotalLiabilities" not in bs_pivot.columns and "TotalLiabilitiesAndEquity" in bs_pivot.columns:
+            bs_pivot["TotalLiabilities"] = (
+                bs_pivot["TotalLiabilitiesAndEquity"] - bs_pivot["StockholdersEquity"]
+            )
+        bs_pivot.drop(columns=["TotalLiabilitiesAndEquity"], errors="ignore", inplace=True)
+        bs_pivot["TotalDebt"] = bs_pivot.get("LongTermDebt", 0).fillna(0) + bs_pivot.get("CurrentDebt", 0).fillna(0)
+        bs_pivot["OperatingLeaseLiabilities"] = (
+            bs_pivot.get("OperatingLeaseLiabilityNoncurrent", 0).fillna(0)
+            + bs_pivot.get("OperatingLeaseLiabilityCurrent", 0).fillna(0)
+        )
+        bs_pivot["NetDebt"]   = bs_pivot["TotalDebt"] - bs_pivot.get("Cash", 0).fillna(0)
+
+    # ── Cash flow post-processing ─────────────────────────────────────────────
+    if not cf_pivot_full.empty:
+        has_capex = cf_pivot_full.get("CapEx").notna() if "CapEx" in cf_pivot_full.columns else pd.Series([False]*len(cf_pivot_full))
+        cf_pivot_full["FreeCashFlow"] = np.where(
+            has_capex,
+            cf_pivot_full.get("OperatingCF", 0) - cf_pivot_full.get("CapEx", 0),
+            np.where(
+                cf_pivot_full.get("InvestingCF").notna() if "InvestingCF" in cf_pivot_full.columns else False,
+                cf_pivot_full.get("OperatingCF", 0) + cf_pivot_full.get("InvestingCF", 0),
+                np.nan
+            )
+        )
+    
+    return income_pivot, bs_pivot, cf_pivot_full
+
+
 # ── Main fetch ────────────────────────────────────────────────────────────────
 
-def fetch_all_financials(ticker: str):
-    company = Company(ticker)
-    facts   = company.get_facts()
-    if facts is None:
-        raise ValueError(f"No facts found for ticker: {ticker}")
-
-    raw         = facts.to_dataframe(include_metadata=True)
-    flow_raw    = _filter_annual_flow(raw)
-    instant_raw = _filter_annual_instant(raw)
+def fetch_all_financials(ticker: str, frequency: str = "annual", raw_facts=None):
+    if raw_facts is not None:
+        raw = raw_facts
+    else:
+        company = Company(ticker)
+        facts   = company.get_facts()
+        if facts is None:
+            raise ValueError(f"No facts found for ticker: {ticker}")
+        raw = facts.to_dataframe(include_metadata=True)
+    
+    if frequency == "annual":
+        flow_raw    = _filter_annual_flow(raw)
+        instant_raw = _filter_annual_instant(raw)
+    else:
+        flow_raw    = _filter_quarterly_flow(raw)
+        instant_raw = _filter_quarterly_instant(raw)
 
     if flow_raw.empty and instant_raw.empty:
-        raise ValueError(f"No annual filing data found for ticker: {ticker}")
+        raise ValueError(f"No {frequency} filing data found for ticker: {ticker}")
 
     # ── Income statement ──────────────────────────────────────────────────────
-    income_pivot = _build_from_concepts(flow_raw, INCOME_CONCEPTS, INCOME_CONCEPTS_IFRS)
+    income_pivot = _build_from_concepts(flow_raw, INCOME_CONCEPTS, INCOME_CONCEPTS_IFRS, frequency=frequency)
     if income_pivot.empty:
-        raise ValueError(f"No income statement data found for ticker: {ticker}")
-
-    # Fix DilutedShares unit inconsistency (some companies switch from reporting
-    # in whole units to thousands, causing ~1000x drop between adjacent years)
-    if "DilutedShares" in income_pivot.columns:
-        shares = income_pivot["DilutedShares"].dropna()
-        if len(shares) >= 2:
-            median_shares = shares.median()
-            mask = income_pivot["DilutedShares"] < (median_shares * 0.01)
-            income_pivot.loc[mask, "DilutedShares"] *= 1000
-
-    income_pivot["GrossMargin"] = (
-        (income_pivot["Revenue"] - income_pivot["CostOfSales"])
-        / income_pivot["Revenue"] * 100
-    )
-    income_pivot["OperatingMargin"] = (
-        income_pivot["OperatingIncome"] / income_pivot["Revenue"] * 100
-    )
-    income_pivot["EBITDA"] = income_pivot["OperatingIncome"] + income_pivot["DA"]
-    income_pivot["EBITDAMargin"] = income_pivot["EBITDA"] / income_pivot["Revenue"] * 100
-
-    income_pivot = income_pivot.sort_values("period_end").reset_index(drop=True)
-    income_pivot["RevenueGrowth"] = income_pivot["Revenue"].pct_change() * 100
-    income_pivot["OperatingIncomeGrowth"] = income_pivot["OperatingIncome"].pct_change() * 100
+        raise ValueError(f"No income statement data found for {frequency} for ticker: {ticker}")
 
     # ── Balance sheet ─────────────────────────────────────────────────────────
-    bs_pivot = _build_from_concepts(instant_raw, BALANCE_SHEET_CONCEPTS, BALANCE_SHEET_CONCEPTS_IFRS)
-    if not bs_pivot.empty:
-        mask = bs_pivot["TotalLiabilities"].isna()
-        bs_pivot.loc[mask, "TotalLiabilities"] = (
-            bs_pivot.loc[mask, "TotalLiabilitiesAndEquity"]
-            - bs_pivot.loc[mask, "StockholdersEquity"]
-        )
-        bs_pivot.drop(columns=["TotalLiabilitiesAndEquity"], inplace=True)
-        bs_pivot["TotalDebt"] = bs_pivot["LongTermDebt"].fillna(0) + bs_pivot["CurrentDebt"].fillna(0)
-        bs_pivot["OperatingLeaseLiabilities"] = (
-            bs_pivot["OperatingLeaseLiabilityNoncurrent"].fillna(0)
-            + bs_pivot["OperatingLeaseLiabilityCurrent"].fillna(0)
-        )
-        bs_pivot["NetDebt"]   = bs_pivot["TotalDebt"] - bs_pivot["Cash"].fillna(0)
+    bs_pivot = _build_from_concepts(instant_raw, BALANCE_SHEET_CONCEPTS, BALANCE_SHEET_CONCEPTS_IFRS, frequency=frequency)
 
-    # ── Cash flow (keep CapEx in pivot) ───────────────────────────────────────
-    cf_lookup = {f"us-gaap:{k}": v for k, v in CASH_FLOW_CONCEPTS.items()}
-    cf_lookup.update({f"ifrs-full:{k}": v for k, v in CASH_FLOW_CONCEPTS_IFRS.items()})
-    cf_df = flow_raw[flow_raw["concept"].isin(cf_lookup)].copy()
-    if cf_df.empty:
-        raise ValueError(f"No cash flow data found for ticker: {ticker}")
+    # ── Cash flow ─────────────────────────────────────────────────────────────
+    # Convert CASH_FLOW_CONCEPTS to the same format as INCOME_CONCEPTS for _build_from_concepts
+    # Mapping from metric to list of concepts
+    cf_concepts = {}
+    for concept, metric in CASH_FLOW_CONCEPTS.items():
+        if metric not in cf_concepts: cf_concepts[metric] = []
+        cf_concepts[metric].append(concept)
+    
+    cf_concepts_ifrs = {}
+    for concept, metric in CASH_FLOW_CONCEPTS_IFRS.items():
+        if metric not in cf_concepts_ifrs: cf_concepts_ifrs[metric] = []
+        cf_concepts_ifrs[metric].append(concept)
 
-    cf_df["fact"] = cf_df["concept"].map(cf_lookup)
-    # Priority dedup: earlier concept in CASH_FLOW_CONCEPTS wins over later ones
-    _cf_priority = {v: i for i, v in enumerate(cf_lookup.keys())}
-    cf_df["_priority"] = cf_df["concept"].map(_cf_priority)
-    cf_df["_year_bucket"] = cf_df["period_end"].dt.year
-    cf_df = (cf_df.sort_values("filing_date")
-             .drop_duplicates(subset=["fact", "_year_bucket", "_priority"], keep="last"))
-    cf_df = (cf_df.sort_values("_priority")
-             .drop_duplicates(subset=["fact", "_year_bucket"], keep="first"))
-    cf_df = cf_df.drop(columns=["_priority", "_year_bucket"])
-    cf_pivot_full = _dedup_and_pivot(cf_df, list(dict.fromkeys(CASH_FLOW_CONCEPTS.values())))
-    cf_pivot_full.index.name = "period_end"
-    cf_pivot_full.reset_index(inplace=True)
-    has_capex = cf_pivot_full["CapEx"].notna()
-    cf_pivot_full["FreeCashFlow"] = np.where(
-        has_capex,
-        cf_pivot_full["OperatingCF"] - cf_pivot_full["CapEx"],
-        np.where(
-            cf_pivot_full["InvestingCF"].notna(),
-            cf_pivot_full["OperatingCF"] + cf_pivot_full["InvestingCF"],
-            np.nan
-        )
-    )
+    cf_pivot_full = _build_from_concepts(flow_raw, cf_concepts, cf_concepts_ifrs, frequency=frequency)
+    if cf_pivot_full.empty:
+        raise ValueError(f"No cash flow data found for {frequency} for ticker: {ticker}")
 
-    # ── TTM ───────────────────────────────────────────────────────────────────
-    ttm = _compute_ttm(raw, income_pivot, bs_pivot, cf_pivot_full)
+    # Post-process
+    income_pivot, bs_pivot, cf_pivot_full = _post_process_pivots(income_pivot, bs_pivot, cf_pivot_full, frequency=frequency)
 
-    # Return cf_pivot_full (includes CapEx)
+    # ── TTM (always computed from raw) ────────────────────────────────────────
+    # For TTM we need the annual income_pivot to know where the annuals end
+    if frequency == "annual":
+        ann_income = income_pivot
+        ann_bs     = bs_pivot
+        ann_cf     = cf_pivot_full
+    else:
+        # Fetch annual if we are doing quarterly, because TTM needs them
+        flow_ann    = _filter_annual_flow(raw)
+        inst_ann    = _filter_annual_instant(raw)
+        ann_income  = _build_from_concepts(flow_ann, INCOME_CONCEPTS, INCOME_CONCEPTS_IFRS, frequency="annual")
+        ann_bs      = _build_from_concepts(inst_ann, BALANCE_SHEET_CONCEPTS, BALANCE_SHEET_CONCEPTS_IFRS, frequency="annual")
+        ann_cf      = _build_from_concepts(flow_ann, cf_concepts, cf_concepts_ifrs, frequency="annual")
+        ann_income, ann_bs, ann_cf = _post_process_pivots(ann_income, ann_bs, ann_cf, frequency="annual")
+
+    ttm = _compute_ttm(raw, ann_income, ann_bs, ann_cf)
+
     return income_pivot, bs_pivot, cf_pivot_full, ttm
 
 

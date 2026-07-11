@@ -20,3 +20,11 @@ env/
 # Editor folders
 .vscode/
 .idea/
+
+# Database files
+data.db
+
+# Temporary checker logs/state
+**/form4.log
+**/.last_run
+
