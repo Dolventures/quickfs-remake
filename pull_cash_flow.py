@@ -3,7 +3,7 @@ import pandas as pd
 import yfinance as yf
 from edgar import set_identity, Company
 
-set_identity("daniellandy1@gmail.com")
+set_identity("email@example.com")
 
 ANNUAL_FORMS = {"10-K", "10-K405", "10-KSB", "20-F", "20-F/A"}
 
@@ -992,7 +992,8 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
     except Exception:
         merged["_price"] = None
 
-    merged["MarketCap"]  = merged["DilutedShares"] * merged["_price"]
+    merged["SharePrice"] = merged["_price"]
+    merged["MarketCap"]  = merged["DilutedShares"] * merged["SharePrice"]
     merged["EV"]         = merged["MarketCap"] + merged["TotalDebt"].fillna(0) + merged["OperatingLeaseLiabilities"].fillna(0) - merged["Cash"].fillna(0)
     merged["EVToSales"]  = merged["EV"] / merged["Revenue"]
     merged["EVToEBITDA"] = merged["EV"] / merged["EBITDA"]
@@ -1010,7 +1011,7 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
     merged["ROE"]  = merged["NetIncome"] / merged["StockholdersEquity"] * 100
     merged["ROA"]  = merged["NetIncome"] / merged["TotalAssets"] * 100
 
-    keep_cols = ["period_end", "MarketCap", "EV", "EVToSales", "EVToEBITDA",
+    keep_cols = ["period_end", "SharePrice", "DilutedShares", "MarketCap", "EV", "EVToSales", "EVToEBITDA",
                  "FCFToEV", "FCFToMarketCap", "NetDebtToEBITDA", "InterestCoverage",
                  "CurrentAssetsToLiabilities", "ROIC", "ROE", "ROA", "FCFPerShare"]
     result = (merged[keep_cols]
@@ -1022,10 +1023,12 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
     # Prepend TTM row if available
     if ttm:
         try:
-            info       = yf.Ticker(ticker).info
-            market_cap = info.get("marketCap") or None
+            info        = yf.Ticker(ticker).info
+            market_cap  = info.get("marketCap") or None
+            share_price = info.get("currentPrice") or info.get("regularMarketPrice") or None
         except Exception:
             market_cap = None
+            share_price = None
 
         ttm_inc = ttm["income"]
         ttm_bs  = ttm["balance_sheet"]
@@ -1064,6 +1067,8 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
 
         ttm_row = {
             "period_end":                 ttm["period_label"],
+            "SharePrice":                 share_price,
+            "DilutedShares":              ttm_shares,
             "MarketCap":                  market_cap,
             "EV":                         ttm_ev,
             "EVToSales":                  (ttm_ev / ttm_rev) if ttm_ev and ttm_rev else None,
