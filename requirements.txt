@@ -3,3 +3,4 @@ edgartools
 yfinance
 pandas
 numpy
+gunicorn
