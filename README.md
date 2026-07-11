@@ -10,6 +10,11 @@ A local web app that pulls historical financial data directly from SEC EDGAR fil
 
 All financial data comes from official SEC filings — no paid subscription required.
 
+## Hosted Version
+
+If you do not want to run this application locally, you can access the hosted version directly at:
+**[tickerfs.com](https://tickerfs.com)**
+
 ---
 
 ## What You Need Before Starting
