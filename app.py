@@ -39,6 +39,11 @@ def index():
     return render_template("index.html", ga_id=os.getenv("GOOGLE_ANALYTICS_ID"))
 
 
+@app.route("/api/version")
+def version():
+    return jsonify({"version": "v1.2"})
+
+
 @app.route("/api/financials")
 def financials():
     ticker = request.args.get("ticker", "").strip().upper()

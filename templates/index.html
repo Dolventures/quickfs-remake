@@ -671,6 +671,67 @@
     .link-sec:hover {
       text-decoration: underline;
     }
+
+    /* ── Mobile responsiveness overrides ─────────────────────────────────── */
+    @media (max-width: 768px) {
+      header {
+        height: auto !important;
+        flex-direction: column;
+        align-items: stretch !important;
+        padding: 12px 16px !important;
+        gap: 10px !important;
+        position: relative !important;
+      }
+      .logo {
+        text-align: center;
+      }
+      .nav-tabs {
+        justify-content: center;
+      }
+      .header-ticker {
+        padding-left: 0 !important;
+        flex-wrap: wrap;
+        gap: 12px;
+        justify-content: space-between;
+      }
+      .scale-toggle {
+        justify-content: center;
+      }
+      .summary-grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+      }
+      .ib-header-bar {
+        flex-direction: column;
+        align-items: stretch !important;
+        gap: 16px !important;
+      }
+      .ib-actions {
+        flex-direction: column;
+        align-items: stretch !important;
+        width: 100% !important;
+      }
+      .ib-date-picker-group {
+        flex-direction: column;
+        width: 100% !important;
+        gap: 10px !important;
+      }
+      .date-picker-field {
+        width: 100% !important;
+      }
+      .date-picker-field input, .date-picker-field select {
+        width: 100% !important;
+        box-sizing: border-box;
+        height: 32px;
+      }
+      .ib-btn {
+        width: 100% !important;
+        height: 36px !important;
+      }
+      .ib-status {
+        max-width: 100% !important;
+        text-align: center;
+      }
+    }
   </style>
 </head>
 <body>
@@ -775,7 +836,7 @@
       <div id="ib-error" class="error-msg" style="display: none; margin-bottom: 14px;"></div>
       
       <div class="table-wrapper">
-        <table class="ib-table">
+        <table class="ib-table" style="min-width: 1000px">
           <thead>
             <tr>
               <th style="width: 50px;">#</th>
@@ -999,7 +1060,7 @@
         ${Array(dataCols).fill('<col style="width:85px">').join("")}
       </colgroup>`;
 
-      let html = `<div class="table-wrapper"><table>
+      let html = `<div class="table-wrapper"><table style="min-width: ${160 + dataCols * 85}px">
         ${colgroup}
         <thead><tr>
           <th>Metric <span class="scale-note">($ ${G_SCALE.unit})</span></th>
@@ -1079,7 +1140,7 @@
         </div>`;
       };
 
-      let html = `<div class="table-wrapper"><table class="vc-table">
+      let html = `<div class="table-wrapper"><table class="vc-table" style="min-width: 660px">
         <thead><tr>
           <th>Metric</th>
           <th>Current</th>
