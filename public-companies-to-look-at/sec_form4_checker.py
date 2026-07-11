@@ -35,10 +35,10 @@ log = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 
 MARKET_CAP_LIMIT = 2_000_000_000  # $2B
-EDGAR_HEADERS = {"User-Agent": os.environ["EDGAR_USER_AGENT"]}  # required by SEC
-EMAIL_FROM = os.environ["EMAIL_FROM"]
-EMAIL_TO = os.environ["EMAIL_TO"]
-EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]  # app password if using Gmail
+EDGAR_HEADERS = {"User-Agent": os.getenv("EDGAR_USER_AGENT", "Anonymous contact@example.com")}  # required by SEC
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_TO = os.getenv("EMAIL_TO")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")  # app password if using Gmail
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 
@@ -209,6 +209,10 @@ def get_market_cap(ticker: str) -> float | None:
 
 
 def send_email(subject: str, html_body: str, text_body: str) -> None:
+    if not all([EMAIL_FROM, EMAIL_TO, EMAIL_PASSWORD]):
+        log.error("Email variables (EMAIL_FROM, EMAIL_TO, EMAIL_PASSWORD) not configured. Skipping email send.")
+        return
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = EMAIL_FROM

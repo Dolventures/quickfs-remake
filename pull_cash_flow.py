@@ -1,9 +1,13 @@
+import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from edgar import set_identity, Company
+from dotenv import load_dotenv
 
-set_identity("email@example.com")
+load_dotenv()
+
+set_identity(os.getenv("EDGAR_USER_AGENT", "email@example.com"))
 
 ANNUAL_FORMS = {"10-K", "10-K405", "10-KSB", "20-F", "20-F/A"}
 
