@@ -42,95 +42,39 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")  # app password if using Gmail
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 
-EDGAR_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index"
-EDGAR_BASE_URL = "https://www.sec.gov"
-
 # ── SEC EDGAR helpers ─────────────────────────────────────────────────────────
 
 
 def fetch_form4_filings(target_date: date) -> list[dict]:
     """
-    Return all Form 4 filings for target_date.
-
-    EDGAR EFTS _id format: "{adsh}:{xml_filename}"
-    ciks[-1] is always the issuer (company) CIK for Form 4.
+    Return all Form 4 filings for target_date using edgartools index downloads.
+    Avoids efts.sec.gov search-index which blocks cloud hosting IPs.
     """
+    from edgar import get_filings, set_identity
+    
+    set_identity(os.getenv("EDGAR_USER_AGENT", "TickerFS contact@historysbestsellers.com"))
     date_str = target_date.strftime("%Y-%m-%d")
-    params = {
-        "q": "",
-        "forms": "4",
-        "dateRange": "custom",
-        "startdt": date_str,
-        "enddt": date_str,
-        "from": 0,
-        "size": 100,
-    }
-
-    filings = []
-    while True:
-        resp = requests.get(EDGAR_SEARCH_URL, params=params, headers=EDGAR_HEADERS, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        hits = data.get("hits", {}).get("hits", [])
-        if not hits:
-            break
-
-        for hit in hits:
-            src = hit.get("_source", {})
-            # _id = "{adsh}:{xml_filename}", e.g. "0000921895-26-000687:form408106003_03132026.xml"
-            hit_id = hit["_id"]
-            if ":" in hit_id:
-                adsh, xml_filename = hit_id.rsplit(":", 1)
-            else:
-                adsh = src.get("adsh", hit_id)
-                xml_filename = None
-
-            # issuer CIK is always last in the ciks list for Form 4
-            ciks = src.get("ciks", [])
-            issuer_cik = ciks[-1].lstrip("0") if ciks else None
-
-            if not issuer_cik or not xml_filename:
-                continue
-
-            acc_nodash = adsh.replace("-", "")
-            xsl = src.get("xsl", "")
-            base = f"{EDGAR_BASE_URL}/Archives/edgar/data/{issuer_cik}/{acc_nodash}"
-            raw_url = f"{base}/{xml_filename}"
-            viewer_url = f"{base}/{xsl}/{xml_filename}" if xsl else raw_url
-
-            # company name is the last display_name entry
-            display_names = src.get("display_names", [])
-            company_name = display_names[-1].split("(CIK")[0].strip() if display_names else ""
-
-            filings.append({
-                "adsh": adsh,
-                "xml_url": raw_url,
-                "filing_url": viewer_url,
-                "company_name": company_name,
-            })
-
-        total = data.get("hits", {}).get("total", {}).get("value", 0)
-        params["from"] += len(hits)
-        if params["from"] >= total:
-            break
-
-        time.sleep(0.1)  # be polite to EDGAR
-
-    log.info("Found %d Form 4 filings for %s", len(filings), date_str)
-    return filings
-
-
-def fetch_form4_xml(xml_url: str) -> str | None:
-    """Download Form 4 XML directly by URL."""
+    
     try:
-        resp = requests.get(xml_url, headers=EDGAR_HEADERS, timeout=15)
-        if resp.status_code != 200:
-            log.debug("XML not found: %s (HTTP %s)", xml_url, resp.status_code)
-            return None
-        return resp.text
-    except Exception as exc:
-        log.debug("Error fetching XML %s: %s", xml_url, exc)
-        return None
+        filings = get_filings(filing_date=date_str, form="4")
+        if not filings:
+            log.info("No Form 4 filings found for %s", date_str)
+            return []
+            
+        results = []
+        for filing in filings:
+            results.append({
+                "adsh": filing.accession_no,
+                "cik": str(filing.cik),
+                "filing_url": filing.homepage_url,
+                "filing_obj": filing
+            })
+            
+        log.info("Found %d Form 4 filings for %s", len(results), date_str)
+        return results
+    except Exception as e:
+        log.error("Failed to fetch Form 4 filings via edgartools: %s", e)
+        return []
 
 
 def parse_purchases(xml_text: str) -> list[dict]:
@@ -282,7 +226,12 @@ def process_date(target_date: date, seen_tickers: dict, strict: bool = True) -> 
     for i, filing in enumerate(filings):
         log.info("[%s %d/%d] %s", target_date, i + 1, len(filings), filing["adsh"])
 
-        xml_text = fetch_form4_xml(filing["xml_url"])
+        try:
+            xml_text = filing["filing_obj"].xml()
+        except Exception as e:
+            log.warning("Could not download XML for filing %s: %s", filing["adsh"], e)
+            xml_text = None
+
         if not xml_text:
             continue
 

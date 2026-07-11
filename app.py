@@ -36,7 +36,7 @@ def sanitize(obj):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", ga_id=os.getenv("GOOGLE_ANALYTICS_ID"))
 
 
 @app.route("/api/financials")
