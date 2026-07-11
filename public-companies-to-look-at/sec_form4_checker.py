@@ -13,7 +13,6 @@ import os
 import sys
 import time
 import smtplib
-import sqlite3
 import logging
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
@@ -335,7 +334,7 @@ def build_email(results: list[dict], start: date, end: date) -> tuple[str, str, 
 # ── Core logic ────────────────────────────────────────────────────────────────
 
 
-def process_date(target_date: date, seen_tickers: dict) -> list[dict]:
+def process_date(target_date: date, seen_tickers: dict, strict: bool = True) -> list[dict]:
     """Fetch and filter Form 4 purchases for a single date. Returns qualifying rows."""
     filings = fetch_form4_filings(target_date)
     qualifying = []
@@ -356,11 +355,12 @@ def process_date(target_date: date, seen_tickers: dict) -> list[dict]:
             seen_tickers[ticker] = get_market_cap(ticker)
         cap = seen_tickers[ticker]
 
-        if cap is not None and cap >= MARKET_CAP_LIMIT:
+        if strict and cap is not None and cap >= MARKET_CAP_LIMIT:
             continue
 
         for p in purchases:
-            if p["total_value"] < 100_000:
+            min_val = 100_000 if strict else 5_000
+            if p["total_value"] < min_val:
                 continue
             p["market_cap"] = cap
             p["filing_url"] = filing["filing_url"]
@@ -371,63 +371,6 @@ def process_date(target_date: date, seen_tickers: dict) -> list[dict]:
     return qualifying
 
 
-def get_db_connection():
-    """Get a SQLite connection to data.db in the parent (root) folder."""
-    db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data.db")
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    """Initialize the SQLite database with correct schema."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS insider_buys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT,
-            issuer_name TEXT,
-            insider_name TEXT,
-            insider_title TEXT,
-            transaction_date TEXT,
-            shares REAL,
-            price_per_share REAL,
-            total_value REAL,
-            market_cap REAL,
-            filing_url TEXT,
-            processed_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(ticker, insider_name, transaction_date, shares, price_per_share)
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def save_to_db(results: list[dict]) -> None:
-    """Save parsed purchases to SQLite database, avoiding duplicates."""
-    if not results:
-        return
-    init_db()
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    for r in results:
-        cursor.execute("""
-            INSERT OR IGNORE INTO insider_buys (
-                ticker, issuer_name, insider_name, insider_title,
-                transaction_date, shares, price_per_share, total_value,
-                market_cap, filing_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            r["ticker"], r["issuer_name"], r["insider_name"], r["insider_title"],
-            r["transaction_date"], r["shares"], r["price_per_share"], r["total_value"],
-            r["market_cap"], r["filing_url"]
-        ))
-    conn.commit()
-    conn.close()
-    log.info("Saved %d records to SQLite database.", len(results))
-
-
 def run(start_date: date, end_date: date, send: bool = True) -> list[dict]:
     """Run the checker for a date range. Sends one combined email."""
     all_results = []
@@ -436,7 +379,7 @@ def run(start_date: date, end_date: date, send: bool = True) -> list[dict]:
     current = start_date
     while current <= end_date:
         log.info("=== Processing %s ===", current)
-        rows = process_date(current, seen_tickers)
+        rows = process_date(current, seen_tickers, strict=send)
         all_results.extend(rows)
         log.info("  → %d qualifying purchases so far", len(all_results))
         current += timedelta(days=1)
@@ -450,11 +393,6 @@ def run(start_date: date, end_date: date, send: bool = True) -> list[dict]:
             send_email(subject, html, text)
         else:
             log.info("No qualifying purchases found; skipping email.")
-
-    try:
-        save_to_db(all_results)
-    except Exception as db_exc:
-        log.error("Failed to save to SQLite database: %s", db_exc)
 
     return all_results
 

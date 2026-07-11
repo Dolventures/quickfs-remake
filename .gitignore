@@ -28,3 +28,6 @@ data.db
 **/form4.log
 **/.last_run
 
+# Local cache files
+cache/
+

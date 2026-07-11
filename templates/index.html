@@ -669,6 +669,11 @@
   </header>
 
   <main>
+    <div id="recent-tickers-bar" style="display: none; align-items: center; gap: 10px; background: #fff; padding: 6px 14px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.72rem; margin-bottom: 10px;">
+      <span style="font-weight: 600; color: #64748b;">Recent View History:</span>
+      <div id="recent-tickers-list" style="display: flex; gap: 8px; flex-wrap: wrap;"></div>
+    </div>
+
     <!-- Tab 1: Historical Financials -->
     <div id="tab-financials">
       <div class="spinner-wrap" id="spinner-wrap"><div class="spinner"></div></div>
@@ -685,22 +690,32 @@
       <div class="ib-header-bar">
         <div class="ib-title-group">
           <h2>Insider Open-Market Purchases</h2>
-          <p>Qualifying trades: Transaction code <b>P</b> (open-market buy) | Market cap &lt; $2B | Value &ge; $100k</p>
+          <p>Qualifying trades: Transaction code <b>P</b> (open-market buy) | Customizable filters</p>
         </div>
         
         <div class="ib-actions">
-          <div class="ib-status" id="ib-status-msg">Status: Idle</div>
           <div class="ib-date-picker-group">
             <div class="date-picker-field">
-              <label for="ib-start-date">Start Date</label>
-              <input type="date" id="ib-start-date" />
+              <label for="ib-date">Filing Date</label>
+              <input type="date" id="ib-date" />
             </div>
             <div class="date-picker-field">
-              <label for="ib-end-date">End Date</label>
-              <input type="date" id="ib-end-date" />
+              <label for="ib-min-value">Min Value ($)</label>
+              <input type="number" id="ib-min-value" value="100000" step="10000" style="width: 100px; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 0.72rem; outline: none; color: #0f172a; background: #f8fafc;" />
+            </div>
+            <div class="date-picker-field">
+              <label for="ib-max-market-cap">Max Market Cap</label>
+              <select id="ib-max-market-cap" style="padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 0.72rem; outline: none; color: #0f172a; background: #f8fafc;">
+                <option value="500000000">$500M</option>
+                <option value="1000000000">$1B</option>
+                <option value="2000000000" selected>$2B</option>
+                <option value="5000000000">$5B</option>
+                <option value="10000000000">$10B</option>
+                <option value="0">No Limit</option>
+              </select>
             </div>
           </div>
-          <button class="ib-btn ib-btn-primary" id="ib-refresh-btn">Fetch &amp; Sync Trades</button>
+          <button class="ib-btn ib-btn-primary" id="ib-refresh-btn">Apply Filters</button>
         </div>
       </div>
       
@@ -1159,6 +1174,7 @@
         else {
           _lastRenderArgs = [data.ticker, data.summary, data.income, data.balance_sheet, data.cash_flow, data.annual_metrics, data.ttm, data.valuation_context];
           renderAll(..._lastRenderArgs);
+          addToHistory(data.ticker);
         }
       } catch (err) {
         renderError("Network error — could not reach the server.");
@@ -1175,6 +1191,54 @@
       _lastRenderArgs = null; // Reset on new search
       fetchFinancials(ticker, G_FREQ);
     });
+
+    // ── History & LocalStorage logic ─────────────────────────────────────────
+
+    function addToHistory(ticker) {
+      let history = [];
+      try {
+        history = JSON.parse(localStorage.getItem("financials_history") || "[]");
+      } catch(e) {}
+      
+      history = history.filter(item => item.ticker !== ticker);
+      history.unshift({ ticker: ticker, time: Date.now() });
+      if (history.length > 8) history = history.slice(0, 8);
+      
+      localStorage.setItem("financials_history", JSON.stringify(history));
+      renderHistory();
+    }
+
+    function renderHistory() {
+      const container = document.getElementById("recent-tickers-bar");
+      const list = document.getElementById("recent-tickers-list");
+      
+      let history = [];
+      try {
+        history = JSON.parse(localStorage.getItem("financials_history") || "[]");
+      } catch(e) {}
+      
+      if (history.length === 0) {
+        container.style.display = "none";
+        return;
+      }
+      
+      container.style.display = "flex";
+      
+      const fmtTime = (ts) => {
+        const diff = Date.now() - ts;
+        const mins = Math.round(diff / 60000);
+        if (mins < 1) return "just now";
+        if (mins < 60) return `${mins}m ago`;
+        const hrs = Math.round(mins / 60);
+        if (hrs < 24) return `${hrs}h ago`;
+        const days = Math.round(hrs / 24);
+        return `${days}d ago`;
+      };
+      
+      list.innerHTML = history.map(item => {
+        return `<a class="badge-ticker" onclick="analyzeTicker('${item.ticker}')" style="font-weight:600">${item.ticker} <span style="font-weight:400;font-size:0.62rem;color:#64748b">${fmtTime(item.time)}</span></a>`;
+      }).join("");
+    }
 
     // ── Tab switcher and Insider Buys logic ──────────────────────────────────
     
@@ -1193,7 +1257,6 @@
       if (tabId === "financials") {
         document.getElementById("tab-financials").style.display = "block";
         document.getElementById("tab-insider-buys").style.display = "none";
-        // Show financials-specific header items if data exists
         if (_lastRenderArgs) {
           document.getElementById("header-ticker").style.display = "flex";
           document.getElementById("freq-toggle").style.display = "flex";
@@ -1203,31 +1266,29 @@
       } else {
         document.getElementById("tab-financials").style.display = "none";
         document.getElementById("tab-insider-buys").style.display = "block";
-        // Hide financials-specific header items
         document.getElementById("header-ticker").style.display = "none";
         document.getElementById("freq-toggle").style.display = "none";
         document.getElementById("scale-toggle").style.display = "none";
         document.getElementById("search-form").style.display = "none";
         
-        initIbDates();
+        initIbDate();
         fetchInsiderBuys();
-        pollCheckerStatus();
       }
     }
 
-    function initIbDates() {
-      const startInput = document.getElementById("ib-start-date");
-      const endInput = document.getElementById("ib-end-date");
-      if (!startInput.value || !endInput.value) {
+    function initIbDate() {
+      const dateInput = document.getElementById("ib-date");
+      if (!dateInput.value) {
         const today = new Date();
-        const start = new Date();
-        start.setDate(today.getDate() - 7);
+        const yesterday = new Date();
+        yesterday.setDate(today.getDate() - 1);
         
-        // format as YYYY-MM-DD
-        const fmtDate = (d) => d.toISOString().split('T')[0];
+        // If yesterday was Sunday (0) or Saturday (6), pick Friday
+        const day = yesterday.getDay();
+        if (day === 0) yesterday.setDate(yesterday.getDate() - 2); // Sun -> Fri
+        else if (day === 6) yesterday.setDate(yesterday.getDate() - 1); // Sat -> Fri
         
-        startInput.value = fmtDate(start);
-        endInput.value = fmtDate(today);
+        dateInput.value = yesterday.toISOString().split('T')[0];
       }
     }
 
@@ -1235,24 +1296,35 @@
       const spinner = document.getElementById("ib-spinner-wrap");
       const tbody = document.getElementById("ib-table-body");
       const errorDiv = document.getElementById("ib-error");
+      const btn = document.getElementById("ib-refresh-btn");
+      
+      const dateVal = document.getElementById("ib-date").value;
+      const minVal = document.getElementById("ib-min-value").value;
+      const maxCapVal = document.getElementById("ib-max-market-cap").value;
       
       spinner.style.display = "flex";
       errorDiv.style.display = "none";
+      btn.disabled = true;
       
       try {
-        const res = await fetch("/api/insider-buys?limit=100");
+        const res = await fetch(`/api/insider-buys?date=${dateVal}&min_value=${minVal}&max_market_cap=${maxCapVal}`);
         const data = await res.json();
         
         if (!res.ok) {
           errorDiv.textContent = data.error || "Failed to load insider buys.";
           errorDiv.style.display = "block";
+          tbody.innerHTML = `<tr>
+            <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #dc2626;">
+              ${data.error || "Failed to load insider buys."}
+            </td>
+          </tr>`;
           return;
         }
         
         if (!data.results || data.results.length === 0) {
           tbody.innerHTML = `<tr>
             <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #94a3b8;">
-              No insider trade records found. Click "Fetch &amp; Sync Trades" to query the SEC database.
+              No insider trades found matching your filters for this date.
             </td>
           </tr>`;
           return;
@@ -1290,6 +1362,7 @@
         errorDiv.style.display = "block";
       } finally {
         spinner.style.display = "none";
+        btn.disabled = false;
       }
     }
 
@@ -1300,67 +1373,10 @@
       fetchFinancials(ticker, G_FREQ);
     }
 
-    let checkerInterval = null;
+    document.getElementById("ib-refresh-btn").addEventListener("click", fetchInsiderBuys);
 
-    async function triggerChecker() {
-      const startVal = document.getElementById("ib-start-date").value;
-      const endVal = document.getElementById("ib-end-date").value;
-      const btn = document.getElementById("ib-refresh-btn");
-      
-      btn.disabled = true;
-      
-      try {
-        const res = await fetch("/api/insider-buys/run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ start_date: startVal, end_date: endVal })
-        });
-        const data = await res.json();
-        
-        if (!res.ok) {
-          alert(data.error || "Failed to trigger checker.");
-          btn.disabled = false;
-          return;
-        }
-        
-        pollCheckerStatus();
-      } catch (err) {
-        alert("Failed to start checker due to network error.");
-        btn.disabled = false;
-      }
-    }
-
-    async function pollCheckerStatus() {
-      const statusMsg = document.getElementById("ib-status-msg");
-      const btn = document.getElementById("ib-refresh-btn");
-      
-      try {
-        const res = await fetch("/api/insider-buys/status");
-        const data = await res.json();
-        
-        if (data.running) {
-          statusMsg.textContent = "Status: " + data.message;
-          btn.disabled = true;
-          // Keep polling every 2 seconds
-          if (!checkerInterval) {
-            checkerInterval = setInterval(pollCheckerStatus, 2000);
-          }
-        } else {
-          statusMsg.textContent = "Status: " + (data.message || "Idle");
-          btn.disabled = false;
-          if (checkerInterval) {
-            clearInterval(checkerInterval);
-            checkerInterval = null;
-            // Reload results when it finishes running
-            fetchInsiderBuys();
-          }
-        }
-      } catch (err) {
-        console.error("Error polling checker status", err);
-      }
-    }
-
-    document.getElementById("ib-refresh-btn").addEventListener("click", triggerChecker);
+    // Initial load
+    renderHistory();
   </script>
 
 </body>
