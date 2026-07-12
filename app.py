@@ -44,6 +44,32 @@ def version():
     return jsonify({"version": "v1.2"})
 
 
+@app.route("/api/test-proxy")
+def test_proxy():
+    import requests
+    url = "https://www.sec.gov/Archives/edgar/daily-index/2026/QTR3/form.20260708.idx"
+    try:
+        direct_resp = requests.get(url, headers={"User-Agent": "TickerFS contact@historysbestsellers.com"}, timeout=10)
+        direct_status = direct_resp.status_code
+    except Exception as e:
+        direct_status = f"Error: {e}"
+        
+    try:
+        proxy_url = f"https://api.allorigins.win/raw?url={url}"
+        proxy_resp = requests.get(proxy_url, headers={"User-Agent": "TickerFS contact@historysbestsellers.com"}, timeout=15)
+        proxy_status = proxy_resp.status_code
+        proxy_len = len(proxy_resp.text)
+    except Exception as e:
+        proxy_status = f"Error: {e}"
+        proxy_len = 0
+        
+    return jsonify({
+        "direct_status": direct_status,
+        "proxy_status": proxy_status,
+        "proxy_len": proxy_len
+    })
+
+
 @app.route("/api/financials")
 def financials():
     ticker = request.args.get("ticker", "").strip().upper()
