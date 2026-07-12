@@ -31,3 +31,6 @@ data.db
 # Local cache files
 cache/
 
+# Local secrets
+.env
+

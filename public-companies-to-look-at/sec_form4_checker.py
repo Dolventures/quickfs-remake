@@ -15,6 +15,8 @@ import time
 import smtplib
 import logging
 import xml.etree.ElementTree as ET
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -23,7 +25,12 @@ import requests
 import yfinance as yf
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from script directory or parent (root) directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+dotenv_path = os.path.join(script_dir, ".env")
+if not os.path.exists(dotenv_path):
+    dotenv_path = os.path.join(os.path.dirname(script_dir), ".env")
+load_dotenv(dotenv_path=dotenv_path)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -242,56 +249,121 @@ def build_email(results: list[dict], start: date, end: date) -> tuple[str, str, 
 # ── Core logic ────────────────────────────────────────────────────────────────
 
 
+class RateLimiter:
+    def __init__(self, requests_per_second=9):
+        self.delay = 1.0 / requests_per_second
+        self.lock = threading.Lock()
+        self.last_request_time = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_request_time
+            if elapsed < self.delay:
+                time.sleep(self.delay - elapsed)
+            self.last_request_time = time.time()
+
+
+seen_tickers_lock = threading.Lock()
+
+
+def process_filing(filing: dict, target_date: date, idx: int, total: int, session: requests.Session, limiter: RateLimiter, seen_tickers: dict, strict: bool) -> list[dict]:
+    """Worker function to process a single filing."""
+    log.info("[%s %d/%d] %s", target_date, idx + 1, total, filing["adsh"])
+    
+    limiter.wait()
+    try:
+        txt_resp = session.get(filing["raw_url"], headers=EDGAR_HEADERS, timeout=10)
+        if txt_resp.status_code == 403:
+            log.debug("Direct download of raw text failed (403). Retrying via proxy...")
+            proxy_url = f"https://api.allorigins.win/raw?url={filing['raw_url']}"
+            limiter.wait()
+            txt_resp = session.get(proxy_url, headers=EDGAR_HEADERS, timeout=20)
+            
+        txt_resp.raise_for_status()
+        txt_content = txt_resp.text
+        
+        if "<ownershipDocument>" in txt_content:
+            xml_text = "<ownershipDocument>" + txt_content.split("<ownershipDocument>")[1].split("</ownershipDocument>")[0] + "</ownershipDocument>"
+        else:
+            xml_text = None
+    except Exception as e:
+        log.warning("Could not download raw text filing for %s: %s", filing["adsh"], e)
+        xml_text = None
+
+    if not xml_text:
+        return []
+
+    purchases = parse_purchases(xml_text)
+    if not purchases:
+        return []
+
+    # OPTIMIZATION: Filter purchases by value before making slow get_market_cap (yfinance) requests
+    min_val = 100_000 if strict else 5_000
+    valid_purchases = [p for p in purchases if p["total_value"] >= min_val]
+    if not valid_purchases:
+        return []
+
+    ticker = valid_purchases[0]["ticker"]
+    
+    with seen_tickers_lock:
+        in_cache = ticker in seen_tickers
+        if in_cache:
+            cap = seen_tickers[ticker]
+
+    if not in_cache:
+        cap = get_market_cap(ticker)
+        with seen_tickers_lock:
+            seen_tickers[ticker] = cap
+
+    if strict and cap is not None and cap >= MARKET_CAP_LIMIT:
+        return []
+
+    qualifying = []
+    for p in valid_purchases:
+        p["market_cap"] = cap
+        p["filing_url"] = filing["filing_url"]
+        qualifying.append(p)
+
+    return qualifying
+
+
 def process_date(target_date: date, seen_tickers: dict, strict: bool = True) -> list[dict]:
     """Fetch and filter Form 4 purchases for a single date. Returns qualifying rows."""
     filings = fetch_form4_filings(target_date)
+    if not filings:
+        return []
+
     qualifying = []
+    limiter = RateLimiter(requests_per_second=9)
 
-    for i, filing in enumerate(filings):
-        log.info("[%s %d/%d] %s", target_date, i + 1, len(filings), filing["adsh"])
+    with requests.Session() as session:
+        adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
 
-        try:
-            txt_resp = requests.get(filing["raw_url"], headers=EDGAR_HEADERS, timeout=10)
-            if txt_resp.status_code == 403:
-                log.debug("Direct download of raw text failed (403). Retrying via proxy...")
-                proxy_url = f"https://api.allorigins.win/raw?url={filing['raw_url']}"
-                txt_resp = requests.get(proxy_url, headers=EDGAR_HEADERS, timeout=20)
-                
-            txt_resp.raise_for_status()
-            txt_content = txt_resp.text
-            
-            if "<ownershipDocument>" in txt_content:
-                xml_text = "<ownershipDocument>" + txt_content.split("<ownershipDocument>")[1].split("</ownershipDocument>")[0] + "</ownershipDocument>"
-            else:
-                xml_text = None
-        except Exception as e:
-            log.warning("Could not download raw text filing for %s: %s", filing["adsh"], e)
-            xml_text = None
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [
+                executor.submit(
+                    process_filing,
+                    filing,
+                    target_date,
+                    idx,
+                    len(filings),
+                    session,
+                    limiter,
+                    seen_tickers,
+                    strict
+                )
+                for idx, filing in enumerate(filings)
+            ]
 
-        if not xml_text:
-            continue
-
-        purchases = parse_purchases(xml_text)
-        if not purchases:
-            continue
-
-        ticker = purchases[0]["ticker"]
-        if ticker not in seen_tickers:
-            seen_tickers[ticker] = get_market_cap(ticker)
-        cap = seen_tickers[ticker]
-
-        if strict and cap is not None and cap >= MARKET_CAP_LIMIT:
-            continue
-
-        for p in purchases:
-            min_val = 100_000 if strict else 5_000
-            if p["total_value"] < min_val:
-                continue
-            p["market_cap"] = cap
-            p["filing_url"] = filing["filing_url"]
-            qualifying.append(p)
-
-        time.sleep(0.15)  # stay within EDGAR's ~10 req/sec limit
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    qualifying.extend(result)
+                except Exception as e:
+                    log.error("Filing processing thread raised an exception: %s", e)
 
     return qualifying
 

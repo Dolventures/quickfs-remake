@@ -8,9 +8,8 @@ import pandas as pd
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 
-# Load env variables from public-companies-to-look-at/.env
-env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public-companies-to-look-at", ".env")
-load_dotenv(dotenv_path=env_path)
+# Load env variables from .env
+load_dotenv()
 
 from pull_cash_flow import fetch_all_financials, compute_summary_metrics, compute_annual_metrics, compute_valuation_context
 
