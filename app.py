@@ -233,8 +233,10 @@ def get_insider_buys():
         })
     except Exception as e:
         import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"Failed to fetch insider buys: {e}"}), 500
+        return jsonify({
+            "error": f"Failed to fetch insider buys: {e}",
+            "traceback": traceback.format_exc()
+        }), 500
 
 
 if __name__ == "__main__":
