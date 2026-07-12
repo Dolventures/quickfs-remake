@@ -202,6 +202,8 @@ def load_daily_trades(date_str):
     # Fetch dynamically from SEC Form 4 Checker
     sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "public-companies-to-look-at"))
     import sec_form4_checker
+    import importlib
+    importlib.reload(sec_form4_checker)
     
     target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     results = sec_form4_checker.run(target_date, target_date, send=False)
