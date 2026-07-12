@@ -67,14 +67,17 @@ def test_proxy():
         proxy_resp = requests.get(proxy_url, headers={"User-Agent": "TickerFS contact@historysbestsellers.com"}, timeout=15)
         proxy_status = proxy_resp.status_code
         proxy_len = len(proxy_resp.text)
+        proxy_final_url = proxy_resp.url
     except Exception as e:
         proxy_status = f"Error: {e}"
         proxy_len = 0
+        proxy_final_url = ""
         
     return jsonify({
         "direct_status": direct_status,
         "proxy_status": proxy_status,
-        "proxy_len": proxy_len
+        "proxy_len": proxy_len,
+        "proxy_final_url": proxy_final_url
     })
 
 
