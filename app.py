@@ -14,6 +14,17 @@ load_dotenv(dotenv_path=env_path)
 
 from pull_cash_flow import fetch_all_financials, compute_summary_metrics, compute_annual_metrics, compute_valuation_context
 
+# Clear old cache files on startup to prevent format mismatch crashes
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+if os.path.exists(CACHE_DIR):
+    for filename in os.listdir(CACHE_DIR):
+        file_path = os.path.join(CACHE_DIR, filename)
+        try:
+            if os.path.isfile(file_path) and filename.startswith("trades_"):
+                os.unlink(file_path)
+        except Exception as e:
+            print("Failed to delete cache file:", e)
+
 app = Flask(__name__)
 
 
