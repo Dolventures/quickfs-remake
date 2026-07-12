@@ -47,7 +47,9 @@ def sanitize(obj):
 
 @app.route("/")
 def index():
-    return render_template("index.html", ga_id=os.getenv("GOOGLE_ANALYTICS_ID"))
+    host = request.host.split(':')[0]
+    is_local = host in ("localhost", "127.0.0.1", "0.0.0.0") or host.startswith("192.168.")
+    return render_template("index.html", ga_id=os.getenv("GOOGLE_ANALYTICS_ID"), is_local=is_local)
 
 
 
@@ -166,6 +168,9 @@ def load_daily_trades(date_str):
 
 @app.route("/api/insider-buys")
 def get_insider_buys():
+    host = request.host.split(':')[0]
+    if host not in ("localhost", "127.0.0.1", "0.0.0.0") and not host.startswith("192.168."):
+        return jsonify({"error": "Insider buys are only available in development environment."}), 403
     from datetime import datetime, timedelta
     
     today = datetime.today()

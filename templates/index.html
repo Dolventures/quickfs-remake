@@ -742,10 +742,12 @@
 
   <header>
     <div class="logo">Financials<span>.</span></div>
+    {% if is_local %}
     <div class="nav-tabs" id="nav-tabs">
       <button class="nav-tab active" data-tab="financials">Financials</button>
       <button class="nav-tab" data-tab="insider-buys">Insider Buys</button>
     </div>
+    {% endif %}
     <div class="header-ticker" id="header-ticker">
       <div class="header-ticker-symbol" id="header-symbol"></div>
       <div class="header-stat">
@@ -802,6 +804,7 @@
       </div>
     </div>
     
+    {% if is_local %}
     <!-- Tab 2: Insider Buys -->
     <div id="tab-insider-buys" style="display: none;">
       <div class="ib-header-bar">
@@ -866,6 +869,7 @@
         </table>
       </div>
     </div>
+    {% endif %}
   </main>
 
   <script>
@@ -1359,34 +1363,48 @@
 
     // ── Tab switcher and Insider Buys logic ──────────────────────────────────
     
-    document.getElementById("nav-tabs").addEventListener("click", (e) => {
-      const tabBtn = e.target.closest(".nav-tab");
-      if (!tabBtn) return;
-      const tabId = tabBtn.dataset.tab;
-      switchTab(tabId);
-    });
+    const navTabs = document.getElementById("nav-tabs");
+    if (navTabs) {
+      navTabs.addEventListener("click", (e) => {
+        const tabBtn = e.target.closest(".nav-tab");
+        if (!tabBtn) return;
+        const tabId = tabBtn.dataset.tab;
+        switchTab(tabId);
+      });
+    }
 
     function switchTab(tabId) {
       document.querySelectorAll(".nav-tab").forEach(btn => {
         btn.classList.toggle("active", btn.dataset.tab === tabId);
       });
       
+      const tabFinancials = document.getElementById("tab-financials");
+      const tabInsiderBuys = document.getElementById("tab-insider-buys");
+      
       if (tabId === "financials") {
-        document.getElementById("tab-financials").style.display = "block";
-        document.getElementById("tab-insider-buys").style.display = "none";
+        if (tabFinancials) tabFinancials.style.display = "block";
+        if (tabInsiderBuys) tabInsiderBuys.style.display = "none";
         if (_lastRenderArgs) {
-          document.getElementById("header-ticker").style.display = "flex";
-          document.getElementById("freq-toggle").style.display = "flex";
-          document.getElementById("scale-toggle").style.display = "flex";
+          const headerTicker = document.getElementById("header-ticker");
+          const freqToggle = document.getElementById("freq-toggle");
+          const scaleToggle = document.getElementById("scale-toggle");
+          if (headerTicker) headerTicker.style.display = "flex";
+          if (freqToggle) freqToggle.style.display = "flex";
+          if (scaleToggle) scaleToggle.style.display = "flex";
         }
-        document.getElementById("search-form").style.display = "flex";
+        const searchForm = document.getElementById("search-form");
+        if (searchForm) searchForm.style.display = "flex";
       } else {
-        document.getElementById("tab-financials").style.display = "none";
-        document.getElementById("tab-insider-buys").style.display = "block";
-        document.getElementById("header-ticker").style.display = "none";
-        document.getElementById("freq-toggle").style.display = "none";
-        document.getElementById("scale-toggle").style.display = "none";
-        document.getElementById("search-form").style.display = "none";
+        if (tabFinancials) tabFinancials.style.display = "none";
+        if (tabInsiderBuys) tabInsiderBuys.style.display = "block";
+        const headerTicker = document.getElementById("header-ticker");
+        const freqToggle = document.getElementById("freq-toggle");
+        const scaleToggle = document.getElementById("scale-toggle");
+        const searchForm = document.getElementById("search-form");
+        if (headerTicker) headerTicker.style.display = "none";
+        if (freqToggle) freqToggle.style.display = "none";
+        if (scaleToggle) scaleToggle.style.display = "none";
+        if (searchForm) searchForm.style.display = "none";
         
         initIbDate();
       }
@@ -1394,7 +1412,7 @@
 
     function initIbDate() {
       const dateInput = document.getElementById("ib-date");
-      if (!dateInput.value) {
+      if (dateInput && !dateInput.value) {
         const today = new Date();
         const yesterday = new Date();
         yesterday.setDate(today.getDate() - 1);
@@ -1413,10 +1431,16 @@
       const tbody = document.getElementById("ib-table-body");
       const errorDiv = document.getElementById("ib-error");
       const btn = document.getElementById("ib-refresh-btn");
+      if (!spinner || !tbody || !errorDiv || !btn) return;
       
-      const dateVal = document.getElementById("ib-date").value;
-      const minVal = document.getElementById("ib-min-value").value;
-      const maxCapVal = document.getElementById("ib-max-market-cap").value;
+      const dateInput = document.getElementById("ib-date");
+      const minInput = document.getElementById("ib-min-value");
+      const maxCapSelect = document.getElementById("ib-max-market-cap");
+      if (!dateInput || !minInput || !maxCapSelect) return;
+
+      const dateVal = dateInput.value;
+      const minVal = minInput.value;
+      const maxCapVal = maxCapSelect.value;
       
       spinner.style.display = "flex";
       errorDiv.style.display = "none";
@@ -1489,12 +1513,17 @@
 
     function analyzeTicker(ticker) {
       document.getElementById("ticker-input").value = ticker;
-      switchTab("financials");
+      if (document.getElementById("nav-tabs")) {
+        switchTab("financials");
+      }
       _lastRenderArgs = null; // reset to fetch fresh
       fetchFinancials(ticker, G_FREQ);
     }
 
-    document.getElementById("ib-refresh-btn").addEventListener("click", fetchInsiderBuys);
+    const refreshBtn = document.getElementById("ib-refresh-btn");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", fetchInsiderBuys);
+    }
 
     // Initial load
     renderHistory();
@@ -1504,9 +1533,10 @@
     const tabParam = urlParams.get("tab");
     const dateParam = urlParams.get("date");
     
-    if (tabParam === "insider-buys") {
-      if (dateParam) {
-        document.getElementById("ib-date").value = dateParam;
+    if (tabParam === "insider-buys" && document.getElementById("nav-tabs")) {
+      const dateInput = document.getElementById("ib-date");
+      if (dateParam && dateInput) {
+        dateInput.value = dateParam;
       }
       switchTab("insider-buys");
       fetchInsiderBuys();
