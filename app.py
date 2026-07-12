@@ -81,6 +81,29 @@ def test_proxy():
     })
 
 
+@app.route("/api/test-checker")
+def test_checker():
+    import os
+    import sys
+    from datetime import date
+    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "public-companies-to-look-at"))
+    import sec_form4_checker
+    try:
+        filings = sec_form4_checker.fetch_form4_filings(date(2026, 7, 8))
+        return jsonify({
+            "status": "success",
+            "count": len(filings),
+            "filings_sample": [f["raw_url"] for f in filings[:3]] if filings else []
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+
+
 @app.route("/api/financials")
 def financials():
     ticker = request.args.get("ticker", "").strip().upper()
