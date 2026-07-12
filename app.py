@@ -42,10 +42,13 @@ def index():
 @app.route("/api/version")
 def version():
     import os
+    import sys
+    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "public-companies-to-look-at"))
+    import sec_form4_checker
     return jsonify({
         "version": "v1.2",
         "edgar_user_agent": os.getenv("EDGAR_USER_AGENT"),
-        "sec_headers": os.getenv("EDGAR_USER_AGENT", "Anonymous contact@example.com")
+        "checker_headers": sec_form4_checker.EDGAR_HEADERS
     })
 
 
