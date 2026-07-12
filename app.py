@@ -41,7 +41,12 @@ def index():
 
 @app.route("/api/version")
 def version():
-    return jsonify({"version": "v1.2"})
+    import os
+    return jsonify({
+        "version": "v1.2",
+        "edgar_user_agent": os.getenv("EDGAR_USER_AGENT"),
+        "sec_headers": os.getenv("EDGAR_USER_AGENT", "Anonymous contact@example.com")
+    })
 
 
 @app.route("/api/test-proxy")
