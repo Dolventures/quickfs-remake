@@ -34,3 +34,6 @@ cache/
 # Local secrets
 .env
 
+# Local automation scripts
+public-companies-to-look-at/
+
