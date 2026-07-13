@@ -184,9 +184,11 @@ def get_insider_buys():
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
         
-    try:
-        raw_trades = load_daily_trades(date_str)
-        
+    from flask import Response
+    from queue import Queue
+    import threading
+
+    def filter_trades(raw_trades):
         filtered = []
         for t in raw_trades:
             if t.get("total_value", 0) < min_value:
@@ -204,18 +206,70 @@ def get_insider_buys():
             filtered.append(t)
             
         filtered.sort(key=lambda x: x.get("total_value", 0), reverse=True)
+        return filtered
+
+    def generate():
+        cache_file = os.path.join(CACHE_DIR, f"trades_{date_str}.json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r") as f:
+                    raw_trades = json.load(f)
+                filtered = filter_trades(raw_trades)
+                yield f"data: {json.dumps({'type': 'results', 'data': {'date': date_str, 'total': len(filtered), 'results': filtered}})}\n\n"
+                return
+            except Exception:
+                pass
+
+        q = Queue()
         
-        return jsonify({
-            "date": date_str,
-            "total": len(filtered),
-            "results": filtered
-        })
-    except Exception as e:
-        import traceback
-        return jsonify({
-            "error": f"Failed to fetch insider buys: {e}",
-            "traceback": traceback.format_exc()
-        }), 500
+        def run_checker():
+            try:
+                sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "public-companies-to-look-at"))
+                import sec_form4_checker
+                import importlib
+                importlib.reload(sec_form4_checker)
+                
+                target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                
+                def cb(current, total):
+                    q.put({"type": "progress", "current": current, "total": total})
+                    
+                results = sec_form4_checker.run(target_date, target_date, send=False, progress_callback=cb)
+                
+                try:
+                    with open(cache_file, "w") as f:
+                        json.dump(results, f)
+                except Exception as e:
+                    print("Failed to save daily trades to cache:", e)
+                    
+                q.put({"type": "done", "results": results})
+            except Exception as e:
+                import traceback
+                q.put({"type": "error", "error": str(e), "traceback": traceback.format_exc()})
+
+        # Start thread
+        t = threading.Thread(target=run_checker)
+        t.start()
+        
+        while True:
+            try:
+                item = q.get(timeout=1.0)
+            except Exception:
+                # Keep-alive
+                yield ": keepalive\n\n"
+                continue
+
+            if item["type"] == "progress":
+                yield f"data: {json.dumps({'type': 'progress', 'current': item['current'], 'total': item['total']})}\n\n"
+            elif item["type"] == "done":
+                filtered = filter_trades(item["results"])
+                yield f"data: {json.dumps({'type': 'results', 'data': {'date': date_str, 'total': len(filtered), 'results': filtered}})}\n\n"
+                break
+            elif item["type"] == "error":
+                yield f"data: {json.dumps({'type': 'error', 'error': item['error']})}\n\n"
+                break
+
+    return Response(generate(), mimetype="text/event-stream")
 
 
 if __name__ == "__main__":

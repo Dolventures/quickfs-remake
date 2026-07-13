@@ -839,7 +839,7 @@
         </div>
       </div>
       
-      <div class="spinner-wrap" id="ib-spinner-wrap" style="display: none;"><div class="spinner"></div></div>
+      <div class="spinner-wrap" id="ib-spinner-wrap" style="display: none; flex-direction: column; gap: 12px;"><div class="spinner"></div><div id="ib-progress-text" style="font-size: 0.85rem; color: #64748b; font-weight: 500; margin-top: 10px;">Fetching daily index...</div></div>
       <div id="ib-error" class="error-msg" style="display: none; margin-bottom: 14px;"></div>
       
       <div class="table-wrapper">
@@ -1426,8 +1426,16 @@
       }
     }
 
-    async function fetchInsiderBuys() {
+    let ibEventSource = null;
+
+    function fetchInsiderBuys() {
+      if (ibEventSource) {
+        ibEventSource.close();
+        ibEventSource = null;
+      }
+
       const spinner = document.getElementById("ib-spinner-wrap");
+      const progressText = document.getElementById("ib-progress-text");
       const tbody = document.getElementById("ib-table-body");
       const errorDiv = document.getElementById("ib-error");
       const btn = document.getElementById("ib-refresh-btn");
@@ -1443,72 +1451,118 @@
       const maxCapVal = maxCapSelect.value;
       
       spinner.style.display = "flex";
+      if (progressText) {
+        progressText.textContent = "Checking cache / fetching daily index...";
+      }
       errorDiv.style.display = "none";
       btn.disabled = true;
       
-      try {
-        const res = await fetch(`/api/insider-buys?date=${dateVal}&min_value=${minVal}&max_market_cap=${maxCapVal}`);
-        const data = await res.json();
-        
-        if (!res.ok) {
-          errorDiv.textContent = data.error || "Failed to load insider buys.";
-          errorDiv.style.display = "block";
-          tbody.innerHTML = `<tr>
-            <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #dc2626;">
-              ${data.error || "Failed to load insider buys."}
-            </td>
-          </tr>`;
-          return;
-        }
-        
-        if (!data.results || data.results.length === 0) {
-          tbody.innerHTML = `<tr>
-            <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #94a3b8;">
-              No insider trades found matching your filters for this date.
-            </td>
-          </tr>`;
-          return;
-        }
-        
-        let html = "";
-        data.results.forEach((r, idx) => {
-          const issuerName = r.issuer_name || r.company || "Unknown";
-          const price = r.price_per_share !== undefined ? r.price_per_share : (r.price !== undefined ? r.price : 0);
-          const txnDate = r.transaction_date || r.filing_date || "—";
-          const shares = r.shares !== undefined ? r.shares : (r.amount !== undefined ? r.amount : 0);
-
-          const capStr = r.market_cap ? `$${(r.market_cap / 1e6).toFixed(0)}M` : "N/A";
-          const valStr = `$${r.total_value.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
-          const priceStr = `$${price.toFixed(2)}`;
-          const sharesStr = shares.toLocaleString(undefined, {maximumFractionDigits: 0});
-          const sourceLink = r.filing_url ? `<a class="link-sec" href="${r.filing_url}" target="_blank">Form 4 ↗</a>` : "—";
-          const actionBtn = `<button class="ib-btn ib-btn-secondary" onclick="analyzeTicker('${r.ticker}')">Analyze</button>`;
+      tbody.innerHTML = `<tr>
+        <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #94a3b8;">
+          Initiating request...
+        </td>
+      </tr>`;
+      
+      const url = `/api/insider-buys?date=${dateVal}&min_value=${minVal}&max_market_cap=${maxCapVal}`;
+      ibEventSource = new EventSource(url);
+      
+      ibEventSource.onmessage = function(event) {
+        try {
+          const data = JSON.parse(event.data);
           
-          html += `<tr>
-            <td style="text-align: center; color: #94a3b8; font-weight: 500;">${idx + 1}</td>
-            <td style="font-weight: 500;">${issuerName}</td>
-            <td style="text-align: center;"><a class="badge-ticker" onclick="analyzeTicker('${r.ticker}')">${r.ticker}</a></td>
-            <td style="text-align: right; font-variant-numeric: tabular-nums;">${capStr}</td>
-            <td>
-              <div style="font-weight: 600; color: #0f172a;">${r.insider_name}</div>
-              <div style="font-size: 0.65rem; color: #64748b;">${r.insider_title || 'Insider'}</div>
-            </td>
-            <td style="text-align: right;">${txnDate}</td>
-            <td style="text-align: right; font-variant-numeric: tabular-nums;">${sharesStr}</td>
-            <td style="text-align: right; font-variant-numeric: tabular-nums;">${priceStr}</td>
-            <td style="text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; color: #16a34a;">${valStr}</td>
-            <td style="text-align: center;">${sourceLink}</td>
-            <td style="text-align: center;">${actionBtn}</td>
-          </tr>`;
-        });
-        tbody.innerHTML = html;
-      } catch (err) {
-        errorDiv.textContent = "Network error — could not fetch insider trade data.";
-        errorDiv.style.display = "block";
-      } finally {
+          if (data.type === "progress") {
+            if (progressText) {
+              progressText.textContent = `Filing ${data.current} of ${data.total}...`;
+            }
+            tbody.innerHTML = `<tr>
+              <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #64748b;">
+                Processing SEC filings: ${data.current} / ${data.total}
+              </td>
+            </tr>`;
+          } else if (data.type === "results") {
+            ibEventSource.close();
+            ibEventSource = null;
+            
+            spinner.style.display = "none";
+            btn.disabled = false;
+            
+            const results = data.data.results;
+            if (!results || results.length === 0) {
+              tbody.innerHTML = `<tr>
+                <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #94a3b8;">
+                  No insider trades found matching your filters for this date.
+                </td>
+              </tr>`;
+              return;
+            }
+            
+            let html = "";
+            results.forEach((r, idx) => {
+              const issuerName = r.issuer_name || r.company || "Unknown";
+              const price = r.price_per_share !== undefined ? r.price_per_share : (r.price !== undefined ? r.price : 0);
+              const txnDate = r.transaction_date || r.filing_date || "—";
+              const shares = r.shares !== undefined ? r.shares : (r.amount !== undefined ? r.amount : 0);
+
+              const capStr = r.market_cap ? `$${(r.market_cap / 1e6).toFixed(0)}M` : "N/A";
+              const valStr = `$${r.total_value.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
+              const priceStr = `$${price.toFixed(2)}`;
+              const sharesStr = shares.toLocaleString(undefined, {maximumFractionDigits: 0});
+              const sourceLink = r.filing_url ? `<a class="link-sec" href="${r.filing_url}" target="_blank">Form 4 ↗</a>` : "—";
+              const actionBtn = `<button class="ib-btn ib-btn-secondary" onclick="analyzeTicker('${r.ticker}')">Analyze</button>`;
+              
+              html += `<tr>
+                <td style="text-align: center; color: #94a3b8; font-weight: 500;">${idx + 1}</td>
+                <td style="font-weight: 500;">${issuerName}</td>
+                <td style="text-align: center;"><a class="badge-ticker" onclick="analyzeTicker('${r.ticker}')">${r.ticker}</a></td>
+                <td style="text-align: right; font-variant-numeric: tabular-nums;">${capStr}</td>
+                <td>
+                  <div style="font-weight: 600; color: #0f172a;">${r.insider_name}</div>
+                  <div style="font-size: 0.65rem; color: #64748b;">${r.insider_title || 'Insider'}</div>
+                </td>
+                <td style="text-align: right;">${txnDate}</td>
+                <td style="text-align: right; font-variant-numeric: tabular-nums;">${sharesStr}</td>
+                <td style="text-align: right; font-variant-numeric: tabular-nums;">${priceStr}</td>
+                <td style="text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; color: #16a34a;">${valStr}</td>
+                <td style="text-align: center;">${sourceLink}</td>
+                <td style="text-align: center;">${actionBtn}</td>
+              </tr>`;
+            });
+            tbody.innerHTML = html;
+          } else if (data.type === "error") {
+            ibEventSource.close();
+            ibEventSource = null;
+            
+            spinner.style.display = "none";
+            btn.disabled = false;
+            
+            errorDiv.textContent = data.error || "Failed to load insider buys.";
+            errorDiv.style.display = "block";
+            tbody.innerHTML = `<tr>
+              <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #dc2626;">
+                ${data.error || "Failed to load insider buys."}
+              </td>
+            </tr>`;
+          }
+        } catch (e) {
+          console.error("Error parsing SSE event", e);
+        }
+      };
+      
+      ibEventSource.onerror = function(err) {
+        ibEventSource.close();
+        ibEventSource = null;
+        
         spinner.style.display = "none";
         btn.disabled = false;
-      }
+        
+        errorDiv.textContent = "Connection lost or error reading progress.";
+        errorDiv.style.display = "block";
+        tbody.innerHTML = `<tr>
+          <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #dc2626;">
+            Error loading insider buys.
+          </td>
+        </tr>`;
+      };
     }
 
     function analyzeTicker(ticker) {
