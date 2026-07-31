@@ -811,17 +811,32 @@
         <div class="ib-title-group">
           <h2>Insider Open-Market Purchases</h2>
           <p>Qualifying trades: Transaction code <b>P</b> (open-market buy) | Customizable filters</p>
+          <div id="ib-last-checked-banner" style="font-size: 0.7rem; color: #475569; background: #f8fafc; border: 1px solid #e2e8f0; padding: 4px 10px; border-radius: 4px; margin-top: 6px; display: inline-flex; align-items: center; gap: 10px;">
+            <span>🕒 Last checked: <strong id="ib-last-checked-text">Never</strong></span>
+            <button class="ib-btn ib-btn-secondary" id="ib-mark-checked-btn" style="height: 22px; font-size: 0.65rem; padding: 1px 8px;">Mark Checked Now</button>
+          </div>
         </div>
         
         <div class="ib-actions">
           <div class="ib-date-picker-group">
             <div class="date-picker-field">
-              <label for="ib-date">Filing Date</label>
+              <label for="ib-date-mode">Date Mode</label>
+              <select id="ib-date-mode" style="padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 0.72rem; outline: none; color: #0f172a; background: #f8fafc;">
+                <option value="single" selected>Single Date</option>
+                <option value="range">Date Range</option>
+              </select>
+            </div>
+            <div class="date-picker-field" id="field-start-date">
+              <label id="lbl-start-date" for="ib-date">Filing Date</label>
               <input type="date" id="ib-date" />
+            </div>
+            <div class="date-picker-field" id="field-end-date" style="display: none;">
+              <label for="ib-end-date">End Date</label>
+              <input type="date" id="ib-end-date" />
             </div>
             <div class="date-picker-field">
               <label for="ib-min-value">Min Value ($)</label>
-              <input type="number" id="ib-min-value" value="100000" step="10000" style="width: 100px; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 0.72rem; outline: none; color: #0f172a; background: #f8fafc;" />
+              <input type="number" id="ib-min-value" value="100000" step="10000" style="width: 90px; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 0.72rem; outline: none; color: #0f172a; background: #f8fafc;" />
             </div>
             <div class="date-picker-field">
               <label for="ib-max-market-cap">Max Market Cap</label>
@@ -835,6 +850,7 @@
               </select>
             </div>
           </div>
+          <button class="ib-btn ib-btn-secondary" id="ib-since-last-btn" style="background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; font-weight: 600;">⚡ Buys Since Last Checked</button>
           <button class="ib-btn ib-btn-primary" id="ib-refresh-btn">Apply Filters</button>
         </div>
       </div>
@@ -990,6 +1006,18 @@
     }
 
     // ── Formatters ───────────────────────────────────────────────────────────
+
+    function fmtTime(ts) {
+      if (ts == null) return "—";
+      const diff = Date.now() - ts;
+      const mins = Math.round(diff / 60000);
+      if (mins < 1) return "just now";
+      if (mins < 60) return `${mins}m ago`;
+      const hrs = Math.round(mins / 60);
+      if (hrs < 24) return `${hrs}h ago`;
+      const days = Math.round(hrs / 24);
+      return `${days}d ago`;
+    }
 
     function fmtDollar(val) {
       if (val == null || isNaN(val) || !isFinite(val)) return "—";
@@ -1323,7 +1351,13 @@
       
       history = history.filter(item => item.ticker !== ticker);
       history.unshift({ ticker: ticker, time: Date.now() });
-      if (history.length > 8) history = history.slice(0, 8);
+      
+      // Filter out items older than 30 days, cap at 100
+      history = history.filter(item => {
+        const ageInDays = (Date.now() - item.time) / (1000 * 60 * 60 * 24);
+        return ageInDays <= 30;
+      });
+      if (history.length > 100) history = history.slice(0, 100);
       
       localStorage.setItem("financials_history", JSON.stringify(history));
       renderHistory();
@@ -1345,18 +1379,8 @@
       
       container.style.display = "flex";
       
-      const fmtTime = (ts) => {
-        const diff = Date.now() - ts;
-        const mins = Math.round(diff / 60000);
-        if (mins < 1) return "just now";
-        if (mins < 60) return `${mins}m ago`;
-        const hrs = Math.round(mins / 60);
-        if (hrs < 24) return `${hrs}h ago`;
-        const days = Math.round(hrs / 24);
-        return `${days}d ago`;
-      };
-      
-      list.innerHTML = history.map(item => {
+      // Only show top 8 in the view history bar
+      list.innerHTML = history.slice(0, 8).map(item => {
         return `<a class="badge-ticker" onclick="analyzeTicker('${item.ticker}')" style="font-weight:600">${item.ticker} <span style="font-weight:400;font-size:0.62rem;color:#64748b">${fmtTime(item.time)}</span></a>`;
       }).join("");
     }
@@ -1410,10 +1434,53 @@
       }
     }
 
+    function getLastChecked() {
+      let ts = null;
+      try {
+        ts = localStorage.getItem("insider_buys_last_checked");
+      } catch(e) {}
+      if (!ts) {
+        const match = document.cookie.match(/(?:^|; )insider_buys_last_checked=([^;]*)/);
+        if (match) ts = decodeURIComponent(match[1]);
+      }
+      return ts ? parseInt(ts, 10) : null;
+    }
+
+    function setLastChecked(ts) {
+      if (!ts) ts = Date.now();
+      try {
+        localStorage.setItem("insider_buys_last_checked", ts.toString());
+      } catch(e) {}
+      document.cookie = `insider_buys_last_checked=${ts}; path=/; max-age=31536000`;
+      updateLastCheckedUI();
+    }
+
+    function updateLastCheckedUI() {
+      const el = document.getElementById("ib-last-checked-text");
+      if (!el) return;
+      const ts = getLastChecked();
+      if (!ts) {
+        el.textContent = "Never";
+      } else {
+        const d = new Date(ts);
+        const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+        const timeStr = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+        el.textContent = `${dateStr} at ${timeStr} (${fmtTime(ts)})`;
+      }
+    }
+
     function initIbDate() {
+      updateLastCheckedUI();
       const dateInput = document.getElementById("ib-date");
+      const endDateInput = document.getElementById("ib-end-date");
+      const today = new Date();
+      const todayStr = today.toISOString().split('T')[0];
+
+      if (endDateInput && !endDateInput.value) {
+        endDateInput.value = todayStr;
+      }
+
       if (dateInput && !dateInput.value) {
-        const today = new Date();
         const yesterday = new Date();
         yesterday.setDate(today.getDate() - 1);
         
@@ -1424,6 +1491,58 @@
         
         dateInput.value = yesterday.toISOString().split('T')[0];
       }
+    }
+
+    const dateModeSelect = document.getElementById("ib-date-mode");
+    if (dateModeSelect) {
+      dateModeSelect.addEventListener("change", (e) => {
+        const mode = e.target.value;
+        const fieldEnd = document.getElementById("field-end-date");
+        const lblStart = document.getElementById("lbl-start-date");
+        if (mode === "range") {
+          if (fieldEnd) fieldEnd.style.display = "flex";
+          if (lblStart) lblStart.textContent = "Start Date";
+        } else {
+          if (fieldEnd) fieldEnd.style.display = "none";
+          if (lblStart) lblStart.textContent = "Filing Date";
+        }
+      });
+    }
+
+    const sinceLastBtn = document.getElementById("ib-since-last-btn");
+    if (sinceLastBtn) {
+      sinceLastBtn.addEventListener("click", () => {
+        const lastTs = getLastChecked();
+        let startDate;
+        if (lastTs) {
+          startDate = new Date(lastTs).toISOString().split('T')[0];
+        } else {
+          const d = new Date();
+          d.setDate(d.getDate() - 7);
+          startDate = d.toISOString().split('T')[0];
+        }
+        const todayStr = new Date().toISOString().split('T')[0];
+        
+        const modeSelect = document.getElementById("ib-date-mode");
+        if (modeSelect) {
+          modeSelect.value = "range";
+          modeSelect.dispatchEvent(new Event("change"));
+        }
+        
+        const dateInput = document.getElementById("ib-date");
+        const endDateInput = document.getElementById("ib-end-date");
+        if (dateInput) dateInput.value = startDate;
+        if (endDateInput) endDateInput.value = todayStr;
+        
+        fetchInsiderBuys();
+      });
+    }
+
+    const markCheckedBtn = document.getElementById("ib-mark-checked-btn");
+    if (markCheckedBtn) {
+      markCheckedBtn.addEventListener("click", () => {
+        setLastChecked(Date.now());
+      });
     }
 
     let ibEventSource = null;
@@ -1446,9 +1565,21 @@
       const maxCapSelect = document.getElementById("ib-max-market-cap");
       if (!dateInput || !minInput || !maxCapSelect) return;
 
-      const dateVal = dateInput.value;
       const minVal = minInput.value;
       const maxCapVal = maxCapSelect.value;
+      const modeSelect = document.getElementById("ib-date-mode");
+      const mode = modeSelect ? modeSelect.value : "single";
+      
+      let url = `/api/insider-buys?min_value=${minVal}&max_market_cap=${maxCapVal}`;
+      if (mode === "range") {
+        const startDateVal = dateInput.value;
+        const endDateInput = document.getElementById("ib-end-date");
+        const endDateVal = endDateInput ? endDateInput.value : startDateVal;
+        url += `&start_date=${startDateVal}&end_date=${endDateVal}`;
+      } else {
+        const dateVal = dateInput.value;
+        url += `&date=${dateVal}`;
+      }
       
       spinner.style.display = "flex";
       if (progressText) {
@@ -1463,7 +1594,6 @@
         </td>
       </tr>`;
       
-      const url = `/api/insider-buys?date=${dateVal}&min_value=${minVal}&max_market_cap=${maxCapVal}`;
       ibEventSource = new EventSource(url);
       
       ibEventSource.onmessage = function(event) {
@@ -1471,12 +1601,13 @@
           const data = JSON.parse(event.data);
           
           if (data.type === "progress") {
+            const msg = data.msg || (data.current ? `Processing filing ${data.current} of ${data.total}...` : "Processing SEC filings...");
             if (progressText) {
-              progressText.textContent = `Filing ${data.current} of ${data.total}...`;
+              progressText.textContent = msg;
             }
             tbody.innerHTML = `<tr>
               <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #64748b;">
-                Processing SEC filings: ${data.current} / ${data.total}
+                ${msg}
               </td>
             </tr>`;
           } else if (data.type === "results") {
@@ -1485,17 +1616,23 @@
             
             spinner.style.display = "none";
             btn.disabled = false;
+            setLastChecked(Date.now());
             
             const results = data.data.results;
             if (!results || results.length === 0) {
               tbody.innerHTML = `<tr>
                 <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #94a3b8;">
-                  No insider trades found matching your filters for this date.
+                  No insider trades found matching your filters for this date/range.
                 </td>
               </tr>`;
               return;
             }
             
+            let history = [];
+            try {
+              history = JSON.parse(localStorage.getItem("financials_history") || "[]");
+            } catch(e) {}
+
             let html = "";
             results.forEach((r, idx) => {
               const issuerName = r.issuer_name || r.company || "Unknown";
@@ -1510,10 +1647,18 @@
               const sourceLink = r.filing_url ? `<a class="link-sec" href="${r.filing_url}" target="_blank">Form 4 ↗</a>` : "—";
               const actionBtn = `<button class="ib-btn ib-btn-secondary" onclick="analyzeTicker('${r.ticker}')">Analyze</button>`;
               
+              const historyItem = history.find(h => h.ticker === r.ticker);
+              const lastViewedHtml = historyItem 
+                ? `<div style="font-size: 0.58rem; color: #0284c7; margin-top: 4px; font-weight: 500; white-space: nowrap;">👁️ ${fmtTime(historyItem.time)}</div>` 
+                : "";
+
               html += `<tr>
                 <td style="text-align: center; color: #94a3b8; font-weight: 500;">${idx + 1}</td>
                 <td style="font-weight: 500;">${issuerName}</td>
-                <td style="text-align: center;"><a class="badge-ticker" onclick="analyzeTicker('${r.ticker}')">${r.ticker}</a></td>
+                <td style="text-align: center;">
+                  <a class="badge-ticker" onclick="analyzeTicker('${r.ticker}')">${r.ticker}</a>
+                  ${lastViewedHtml}
+                </td>
                 <td style="text-align: right; font-variant-numeric: tabular-nums;">${capStr}</td>
                 <td>
                   <div style="font-weight: 600; color: #0f172a;">${r.insider_name}</div>

@@ -786,11 +786,15 @@ def _row_nearest_to_years_ago(df: pd.DataFrame, years: int):
 def compute_summary_metrics(income_df, bs_df, cf_df, ttm, ticker):
     try:
         info        = yf.Ticker(ticker).info
-        market_cap  = info.get("marketCap") or None
+        market_cap  = info.get("marketCap") or info.get("nonDilutedMarketCap") or None
         share_price = info.get("currentPrice") or info.get("regularMarketPrice") or None
         beta        = info.get("beta") or None
         avg_vol     = info.get("averageVolume") or None
-        shares_out  = info.get("sharesOutstanding") or None
+        shares_out  = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding") or None
+        if not market_cap and share_price and shares_out:
+            market_cap = share_price * shares_out
+        if not shares_out and market_cap and share_price and share_price > 0:
+            shares_out = market_cap / share_price
         share_turnover = (avg_vol * 252 / shares_out) if (avg_vol and shares_out) else None
     except Exception:
         market_cap = share_price = beta = share_turnover = None
@@ -1028,8 +1032,12 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
     if ttm:
         try:
             info        = yf.Ticker(ticker).info
-            market_cap  = info.get("marketCap") or None
+            market_cap  = info.get("marketCap") or info.get("nonDilutedMarketCap") or None
             share_price = info.get("currentPrice") or info.get("regularMarketPrice") or None
+            if not market_cap and share_price:
+                shares_out = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding") or None
+                if shares_out:
+                    market_cap = share_price * shares_out
         except Exception:
             market_cap = None
             share_price = None

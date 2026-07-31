@@ -123,7 +123,12 @@ def get_market_cap_cached(ticker):
         
     try:
         info = yf.Ticker(ticker).info
-        cap = info.get("marketCap")
+        cap = info.get("marketCap") or info.get("nonDilutedMarketCap")
+        if not cap:
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+            shares = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+            if price and shares:
+                cap = price * shares
         cap_val = float(cap) if cap else None
         caps[ticker] = cap_val
         
@@ -175,14 +180,24 @@ def get_insider_buys():
     today = datetime.today()
     default_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
     
-    date_str = request.args.get("date", default_date).strip()
+    start_date_str = request.args.get("start_date", request.args.get("date", default_date)).strip()
+    end_date_str = request.args.get("end_date", request.args.get("date", default_date)).strip()
     min_value = request.args.get("min_value", 100000, type=float)
     max_market_cap = request.args.get("max_market_cap", 2000000000, type=float)
     
     try:
-        datetime.strptime(date_str, "%Y-%m-%d")
+        d_start = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+        d_end = datetime.strptime(end_date_str, "%Y-%m-%d").date()
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+        
+    if d_start > d_end:
+        d_start, d_end = d_end, d_start
+
+    # Cap range to max 30 days
+    if (d_end - d_start).days > 30:
+        d_start = d_end - timedelta(days=30)
+        start_date_str = d_start.isoformat()
         
     from flask import Response
     from queue import Queue
@@ -190,13 +205,22 @@ def get_insider_buys():
 
     def filter_trades(raw_trades):
         filtered = []
+        seen = set()
         for t in raw_trades:
+            key = (
+                t.get("adsh") or 
+                (t.get("ticker"), t.get("insider_name"), t.get("transaction_date"), t.get("shares"))
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+
             if t.get("total_value", 0) < min_value:
                 continue
                 
             cap = t.get("market_cap")
             if cap is None:
-                cap = get_market_cap_cached(t["ticker"])
+                cap = get_market_cap_cached(t.get("ticker"))
                 t["market_cap"] = cap
                 
             if max_market_cap > 0:
@@ -209,17 +233,6 @@ def get_insider_buys():
         return filtered
 
     def generate():
-        cache_file = os.path.join(CACHE_DIR, f"trades_{date_str}.json")
-        if os.path.exists(cache_file):
-            try:
-                with open(cache_file, "r") as f:
-                    raw_trades = json.load(f)
-                filtered = filter_trades(raw_trades)
-                yield f"data: {json.dumps({'type': 'results', 'data': {'date': date_str, 'total': len(filtered), 'results': filtered}})}\n\n"
-                return
-            except Exception:
-                pass
-
         q = Queue()
         
         def run_checker():
@@ -229,20 +242,45 @@ def get_insider_buys():
                 import importlib
                 importlib.reload(sec_form4_checker)
                 
-                target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                all_raw_trades = []
+                curr = d_start
+                total_days = (d_end - d_start).days + 1
+                day_idx = 0
                 
-                def cb(current, total):
-                    q.put({"type": "progress", "current": current, "total": total})
+                while curr <= d_end:
+                    day_idx += 1
+                    curr_str = curr.strftime("%Y-%m-%d")
+                    cache_file = os.path.join(CACHE_DIR, f"trades_{curr_str}.json")
                     
-                results = sec_form4_checker.run(target_date, target_date, send=False, progress_callback=cb)
-                
-                try:
-                    with open(cache_file, "w") as f:
-                        json.dump(results, f)
-                except Exception as e:
-                    print("Failed to save daily trades to cache:", e)
+                    if os.path.exists(cache_file):
+                        try:
+                            with open(cache_file, "r") as f:
+                                day_trades = json.load(f)
+                            all_raw_trades.extend(day_trades)
+                            q.put({"type": "progress", "msg": f"Loaded {curr_str} from cache ({day_idx}/{total_days})"})
+                            curr += timedelta(days=1)
+                            continue
+                        except Exception:
+                            pass
+                            
+                    def cb(current, total, c_str=curr_str, d_idx=day_idx):
+                        q.put({
+                            "type": "progress",
+                            "msg": f"Fetching {c_str} ({d_idx}/{total_days}): filing {current}/{total}",
+                            "current": current,
+                            "total": total
+                        })
+                        
+                    results = sec_form4_checker.run(curr, curr, send=False, progress_callback=cb)
+                    try:
+                        with open(cache_file, "w") as f:
+                            json.dump(results, f)
+                    except Exception as e:
+                        print("Failed to save daily trades to cache:", e)
+                    all_raw_trades.extend(results)
+                    curr += timedelta(days=1)
                     
-                q.put({"type": "done", "results": results})
+                q.put({"type": "done", "results": all_raw_trades})
             except Exception as e:
                 import traceback
                 q.put({"type": "error", "error": str(e), "traceback": traceback.format_exc()})
@@ -260,10 +298,11 @@ def get_insider_buys():
                 continue
 
             if item["type"] == "progress":
-                yield f"data: {json.dumps({'type': 'progress', 'current': item['current'], 'total': item['total']})}\n\n"
+                yield f"data: {json.dumps({'type': 'progress', 'msg': item.get('msg', ''), 'current': item.get('current'), 'total': item.get('total')})}\n\n"
             elif item["type"] == "done":
                 filtered = filter_trades(item["results"])
-                yield f"data: {json.dumps({'type': 'results', 'data': {'date': date_str, 'total': len(filtered), 'results': filtered}})}\n\n"
+                date_label = start_date_str if start_date_str == end_date_str else f"{start_date_str} to {end_date_str}"
+                yield f"data: {json.dumps({'type': 'results', 'data': {'start_date': start_date_str, 'end_date': end_date_str, 'date': date_label, 'total': len(filtered), 'results': filtered}})}\n\n"
                 break
             elif item["type"] == "error":
                 yield f"data: {json.dumps({'type': 'error', 'error': item['error']})}\n\n"
