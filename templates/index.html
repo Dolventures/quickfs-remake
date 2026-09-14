@@ -645,6 +645,75 @@
     .ib-table tbody tr:hover td {
       background: #fafbfc;
     }
+    .ib-grouped-row {
+      cursor: pointer;
+      user-select: none;
+      transition: background-color 0.15s ease;
+    }
+    .ib-grouped-row:hover td {
+      background: #f8fafc !important;
+    }
+    .ib-grouped-row.is-expanded td {
+      background: #f1f5f9 !important;
+      border-bottom: none !important;
+    }
+    .ib-badge-count {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 12px;
+      padding: 2px 8px;
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: #1e40af;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+    .ib-badge-count:hover {
+      background: #dbeafe;
+      border-color: #93c5fd;
+      color: #1d4ed8;
+    }
+    .ib-chevron {
+      display: inline-block;
+      font-size: 0.6rem;
+      transition: transform 0.2s ease;
+    }
+    .ib-chevron.open {
+      transform: rotate(180deg);
+    }
+    .ib-detail-row td {
+      white-space: normal !important;
+    }
+    .ib-subtable {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .ib-subtable th {
+      background: #f1f5f9 !important;
+      font-size: 0.65rem !important;
+      font-weight: 600 !important;
+      color: #475569 !important;
+      padding: 6px 10px !important;
+      border-bottom: 1px solid #cbd5e1 !important;
+      border-right: none !important;
+      text-transform: uppercase;
+      letter-spacing: 0.2px;
+    }
+    .ib-subtable td {
+      padding: 6px 10px !important;
+      font-size: 0.72rem !important;
+      color: #1e293b !important;
+      border-bottom: 1px solid #f1f5f9 !important;
+      border-right: none !important;
+      white-space: nowrap !important;
+    }
+    .ib-subtable tbody tr:hover td {
+      background: #f8fafc !important;
+    }
     .badge-ticker {
       display: inline-block;
       padding: 2px 6px;
@@ -849,6 +918,13 @@
                 <option value="0">No Limit</option>
               </select>
             </div>
+            <div class="date-picker-field">
+              <label for="ib-view-mode">Grouping</label>
+              <select id="ib-view-mode" style="padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 0.72rem; outline: none; color: #0f172a; background: #f8fafc; font-weight: 600;">
+                <option value="grouped" selected>Group by Ticker</option>
+                <option value="flat">Individual Trades</option>
+              </select>
+            </div>
           </div>
           <button class="ib-btn ib-btn-secondary" id="ib-since-last-btn" style="background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; font-weight: 600;">⚡ Buys Since Last Checked</button>
           <button class="ib-btn ib-btn-primary" id="ib-refresh-btn">Apply Filters</button>
@@ -857,10 +933,17 @@
       
       <div class="spinner-wrap" id="ib-spinner-wrap" style="display: none; flex-direction: column; gap: 12px;"><div class="spinner"></div><div id="ib-progress-text" style="font-size: 0.85rem; color: #64748b; font-weight: 500; margin-top: 10px;">Fetching daily index...</div></div>
       <div id="ib-error" class="error-msg" style="display: none; margin-bottom: 14px;"></div>
+
+      <div id="ib-summary-bar" style="display: none; align-items: center; justify-content: space-between; background: #fff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 14px; margin-bottom: 12px; font-size: 0.74rem; color: #334155; flex-wrap: wrap; gap: 10px;">
+        <div id="ib-summary-text" style="font-weight: 500;"></div>
+        <div id="ib-summary-actions" style="display: flex; align-items: center; gap: 8px;">
+          <button class="ib-btn ib-btn-secondary" id="ib-toggle-expand-all" style="display: none; height: 24px; font-size: 0.68rem; padding: 0 8px;">Expand All</button>
+        </div>
+      </div>
       
       <div class="table-wrapper">
         <table class="ib-table" style="min-width: 1000px">
-          <thead>
+          <thead id="ib-table-head">
             <tr>
               <th style="width: 50px;">#</th>
               <th>Company</th>
@@ -1545,7 +1628,376 @@
       });
     }
 
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
     let ibEventSource = null;
+    let currentInsiderTrades = [];
+    let expandedTickerRows = new Set();
+
+    function groupTradesByTicker(trades) {
+      const groups = {};
+      (trades || []).forEach(r => {
+        const ticker = (r.ticker || "UNKNOWN").toUpperCase();
+        if (!groups[ticker]) {
+          groups[ticker] = {
+            ticker: ticker,
+            company: r.issuer_name || r.company || "Unknown",
+            market_cap: r.market_cap,
+            trades: [],
+            total_value: 0,
+            total_shares: 0,
+            insidersMap: new Map(),
+            dates: []
+          };
+        }
+        const g = groups[ticker];
+        g.trades.push(r);
+        const price = r.price_per_share !== undefined ? r.price_per_share : (r.price !== undefined ? r.price : 0);
+        const shares = r.shares !== undefined ? r.shares : (r.amount !== undefined ? r.amount : 0);
+        const totalVal = r.total_value !== undefined ? r.total_value : (shares * price);
+        
+        g.total_value += totalVal;
+        g.total_shares += shares;
+        
+        const iName = r.insider_name || "Unknown";
+        const iTitle = r.insider_title || "Insider";
+        if (!g.insidersMap.has(iName)) {
+          g.insidersMap.set(iName, { name: iName, title: iTitle, total_val: 0, count: 0 });
+        }
+        const insInfo = g.insidersMap.get(iName);
+        insInfo.total_val += totalVal;
+        insInfo.count += 1;
+        
+        const dateStr = r.transaction_date || r.filing_date;
+        if (dateStr) g.dates.push(dateStr);
+      });
+
+      const list = Object.values(groups).map(g => {
+        g.avg_price = g.total_shares > 0 ? (g.total_value / g.total_shares) : 0;
+        g.dates.sort();
+        g.start_date = g.dates[0] || "—";
+        g.end_date = g.dates[g.dates.length - 1] || "—";
+        g.date_label = (g.start_date === g.end_date) ? g.start_date : `${g.start_date} → ${g.end_date}`;
+        // Sort trades within the company group by transaction date desc, then value desc
+        g.trades.sort((a, b) => {
+          const dateA = a.transaction_date || a.filing_date || "";
+          const dateB = b.transaction_date || b.filing_date || "";
+          if (dateB !== dateA) return dateB.localeCompare(dateA);
+          return (b.total_value || 0) - (a.total_value || 0);
+        });
+        g.insiders = Array.from(g.insidersMap.values()).sort((a, b) => b.total_val - a.total_val);
+        return g;
+      });
+
+      // Sort companies by total cumulative buy value descending
+      list.sort((a, b) => b.total_value - a.total_value);
+      return list;
+    }
+
+    function toggleTickerRow(ticker, event) {
+      if (event) event.stopPropagation();
+      const subrow = document.getElementById(`subrow-${ticker}`);
+      const chevron = document.getElementById(`chevron-${ticker}`);
+      const mainrow = document.getElementById(`mainrow-${ticker}`);
+      if (!subrow) return;
+
+      if (expandedTickerRows.has(ticker)) {
+        expandedTickerRows.delete(ticker);
+        subrow.style.display = "none";
+        if (chevron) chevron.classList.remove("open");
+        if (mainrow) mainrow.classList.remove("is-expanded");
+      } else {
+        expandedTickerRows.add(ticker);
+        subrow.style.display = "table-row";
+        if (chevron) chevron.classList.add("open");
+        if (mainrow) mainrow.classList.add("is-expanded");
+      }
+
+      updateExpandAllBtnText();
+    }
+
+    function updateExpandAllBtnText() {
+      const expandAllBtn = document.getElementById("ib-toggle-expand-all");
+      if (!expandAllBtn) return;
+      const groupedData = groupTradesByTicker(currentInsiderTrades);
+      const allExpanded = groupedData.length > 0 && groupedData.every(g => expandedTickerRows.has(g.ticker));
+      expandAllBtn.textContent = allExpanded ? "Collapse All" : "Expand All";
+    }
+
+    function toggleExpandAll() {
+      const groupedData = groupTradesByTicker(currentInsiderTrades);
+      const allExpanded = groupedData.length > 0 && groupedData.every(g => expandedTickerRows.has(g.ticker));
+      
+      if (allExpanded) {
+        expandedTickerRows.clear();
+      } else {
+        groupedData.forEach(g => expandedTickerRows.add(g.ticker));
+      }
+      renderInsiderBuysTable();
+    }
+
+    const expandAllBtn = document.getElementById("ib-toggle-expand-all");
+    if (expandAllBtn) {
+      expandAllBtn.addEventListener("click", toggleExpandAll);
+    }
+
+    const viewModeSelect = document.getElementById("ib-view-mode");
+    if (viewModeSelect) {
+      const savedMode = localStorage.getItem("insider_buys_view_mode") || "grouped";
+      viewModeSelect.value = savedMode;
+      viewModeSelect.addEventListener("change", (e) => {
+        localStorage.setItem("insider_buys_view_mode", e.target.value);
+        renderInsiderBuysTable();
+      });
+    }
+
+    function renderInsiderBuysTable() {
+      const thead = document.getElementById("ib-table-head");
+      const tbody = document.getElementById("ib-table-body");
+      const summaryBar = document.getElementById("ib-summary-bar");
+      const summaryText = document.getElementById("ib-summary-text");
+      const expandAllBtn = document.getElementById("ib-toggle-expand-all");
+      const viewModeSelect = document.getElementById("ib-view-mode");
+      if (!tbody) return;
+
+      const viewMode = viewModeSelect ? viewModeSelect.value : (localStorage.getItem("insider_buys_view_mode") || "grouped");
+
+      if (!currentInsiderTrades || currentInsiderTrades.length === 0) {
+        if (summaryBar) summaryBar.style.display = "none";
+        if (expandAllBtn) expandAllBtn.style.display = "none";
+        tbody.innerHTML = `<tr>
+          <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #94a3b8;">
+            No insider trades found matching your filters for this date/range.
+          </td>
+        </tr>`;
+        return;
+      }
+
+      let history = [];
+      try {
+        history = JSON.parse(localStorage.getItem("financials_history") || "[]");
+      } catch(e) {}
+
+      const totalValAll = currentInsiderTrades.reduce((acc, t) => acc + (t.total_value || 0), 0);
+      const totalTradesAll = currentInsiderTrades.length;
+      const groupedData = groupTradesByTicker(currentInsiderTrades);
+      const totalCompanies = groupedData.length;
+
+      // Update Summary Bar
+      if (summaryBar && summaryText) {
+        summaryBar.style.display = "flex";
+        summaryText.innerHTML = `<span>📊 Found <strong>${totalCompanies}</strong> ${totalCompanies === 1 ? 'company' : 'companies'} · <strong>${totalTradesAll}</strong> trade${totalTradesAll === 1 ? '' : 's'} · <strong style="color: #16a34a;">$${totalValAll.toLocaleString(undefined, {maximumFractionDigits: 0})}</strong> total cumulative volume</span>`;
+      }
+
+      if (viewMode === "grouped") {
+        if (expandAllBtn) {
+          expandAllBtn.style.display = "inline-flex";
+          updateExpandAllBtnText();
+        }
+
+        if (thead) {
+          thead.innerHTML = `<tr>
+            <th style="width: 45px; text-align: center;">#</th>
+            <th style="text-align: left;">Company</th>
+            <th style="width: 90px; text-align: center;">Ticker</th>
+            <th style="width: 110px; text-align: right;">Market Cap</th>
+            <th style="text-align: left;">Insider(s)</th>
+            <th style="width: 140px; text-align: right;">Activity Window</th>
+            <th style="width: 110px; text-align: right;">Total Shares</th>
+            <th style="width: 95px; text-align: right;">Avg Price</th>
+            <th style="width: 130px; text-align: right;">Cumulative Value</th>
+            <th style="width: 100px; text-align: center;">Trades</th>
+            <th style="width: 100px; text-align: center;">Action</th>
+          </tr>`;
+        }
+
+        let html = "";
+        groupedData.forEach((g, idx) => {
+          const capStr = g.market_cap ? `$${(g.market_cap / 1e6).toFixed(0)}M` : "N/A";
+          const valStr = `$${g.total_value.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
+          const avgPriceStr = `$${g.avg_price.toFixed(2)}`;
+          const sharesStr = g.total_shares.toLocaleString(undefined, {maximumFractionDigits: 0});
+          const historyItem = history.find(h => h.ticker === g.ticker);
+          const lastViewedHtml = historyItem 
+            ? `<div style="font-size: 0.58rem; color: #0284c7; margin-top: 4px; font-weight: 500; white-space: nowrap;">👁️ ${fmtTime(historyItem.time)}</div>` 
+            : "";
+          
+          let insidersHtml = "";
+          if (g.insiders.length === 1) {
+            const ins = g.insiders[0];
+            insidersHtml = `
+              <div style="font-weight: 600; color: #0f172a;">${escapeHtml(ins.name)}</div>
+              <div style="font-size: 0.65rem; color: #64748b;">${escapeHtml(ins.title || 'Insider')}</div>
+            `;
+          } else {
+            const namesSummary = g.insiders.map(i => `${i.name} (${i.title || 'Insider'})`).join(", ");
+            insidersHtml = `
+              <div style="font-weight: 600; color: #0f172a; display: flex; align-items: center; gap: 6px;">
+                <span>${g.insiders.length} Insiders</span>
+                <span style="font-size: 0.62rem; font-weight: 500; background: #e0f2fe; color: #0369a1; padding: 1px 6px; border-radius: 4px;">Multiple</span>
+              </div>
+              <div style="font-size: 0.65rem; color: #64748b; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(namesSummary)}">
+                ${escapeHtml(namesSummary)}
+              </div>
+            `;
+          }
+
+          const isExpanded = expandedTickerRows.has(g.ticker);
+          const chevronClass = isExpanded ? "ib-chevron open" : "ib-chevron";
+          const rowClass = isExpanded ? "ib-grouped-row is-expanded" : "ib-grouped-row";
+
+          // Subtable rows for individual trades
+          let subRowsHtml = "";
+          g.trades.forEach((t, tIdx) => {
+            const tPrice = t.price_per_share !== undefined ? t.price_per_share : (t.price !== undefined ? t.price : 0);
+            const tShares = t.shares !== undefined ? t.shares : (t.amount !== undefined ? t.amount : 0);
+            const tVal = t.total_value !== undefined ? t.total_value : (tShares * tPrice);
+            const tDate = t.transaction_date || t.filing_date || "—";
+            const tSource = t.filing_url ? `<a class="link-sec" href="${t.filing_url}" target="_blank" onclick="event.stopPropagation()">Form 4 ↗</a>` : "—";
+
+            subRowsHtml += `<tr>
+              <td style="text-align: center; color: #94a3b8; font-weight: 500;">${tIdx + 1}</td>
+              <td style="text-align: left;">
+                <div style="font-weight: 600; color: #0f172a;">${escapeHtml(t.insider_name || 'Unknown')}</div>
+                <div style="font-size: 0.62rem; color: #64748b;">${escapeHtml(t.insider_title || 'Insider')}</div>
+              </td>
+              <td style="text-align: right;">${tDate}</td>
+              <td style="text-align: right; font-variant-numeric: tabular-nums;">${tShares.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+              <td style="text-align: right; font-variant-numeric: tabular-nums;">$${tPrice.toFixed(2)}</td>
+              <td style="text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; color: #16a34a;">$${tVal.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+              <td style="text-align: center;">${tSource}</td>
+            </tr>`;
+          });
+
+          html += `
+            <tr class="${rowClass}" onclick="toggleTickerRow('${g.ticker}', event)" id="mainrow-${g.ticker}">
+              <td style="text-align: center; color: #94a3b8; font-weight: 500;">${idx + 1}</td>
+              <td style="text-align: left; font-weight: 600; color: #0f172a;">${escapeHtml(g.company)}</td>
+              <td style="text-align: center;">
+                <a class="badge-ticker" onclick="event.stopPropagation(); analyzeTicker('${g.ticker}')">${g.ticker}</a>
+                ${lastViewedHtml}
+              </td>
+              <td style="text-align: right; font-variant-numeric: tabular-nums;">${capStr}</td>
+              <td style="text-align: left;">${insidersHtml}</td>
+              <td style="text-align: right; font-size: 0.7rem; color: #475569;">${g.date_label}</td>
+              <td style="text-align: right; font-variant-numeric: tabular-nums;">${sharesStr}</td>
+              <td style="text-align: right; font-variant-numeric: tabular-nums;">${avgPriceStr}</td>
+              <td style="text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; color: #16a34a;">${valStr}</td>
+              <td style="text-align: center;">
+                <button class="ib-badge-count" onclick="event.stopPropagation(); toggleTickerRow('${g.ticker}', event)" title="Click to expand/collapse individual trades">
+                  <span>${g.trades.length} buy${g.trades.length > 1 ? 's' : ''}</span>
+                  <span class="${chevronClass}" id="chevron-${g.ticker}">▼</span>
+                </button>
+              </td>
+              <td style="text-align: center;">
+                <button class="ib-btn ib-btn-secondary" onclick="event.stopPropagation(); analyzeTicker('${g.ticker}')">Analyze</button>
+              </td>
+            </tr>
+            <tr id="subrow-${g.ticker}" class="ib-detail-row" style="display: ${isExpanded ? 'table-row' : 'none'};">
+              <td colspan="11" style="background: #f8fafc; padding: 10px 16px 14px 20px; border-bottom: 2px solid #cbd5e1; border-top: 1px dashed #cbd5e1;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                  <div style="font-size: 0.72rem; font-weight: 700; color: #334155; display: flex; align-items: center; gap: 8px;">
+                    <span>Individual Form 4 Filings for <strong>${g.ticker}</strong> (${g.trades.length} transactions)</span>
+                  </div>
+                  <div style="font-size: 0.68rem; color: #64748b;">
+                    Cumulative Total: <strong style="color: #16a34a;">${valStr}</strong> · Weighted Avg Price: <strong>${avgPriceStr}</strong>
+                  </div>
+                </div>
+                <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 5px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">
+                  <table class="ib-subtable">
+                    <thead>
+                      <tr>
+                        <th style="width: 40px; text-align: center;">#</th>
+                        <th style="text-align: left;">Insider Name &amp; Title</th>
+                        <th style="width: 110px; text-align: right;">Trade Date</th>
+                        <th style="width: 110px; text-align: right;">Shares</th>
+                        <th style="width: 95px; text-align: right;">Price</th>
+                        <th style="width: 120px; text-align: right;">Total Value</th>
+                        <th style="width: 100px; text-align: center;">Source</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${subRowsHtml}
+                    </tbody>
+                  </table>
+                </div>
+              </td>
+            </tr>
+          `;
+        });
+        tbody.innerHTML = html;
+      } else {
+        // Flat individual trades view
+        if (expandAllBtn) {
+          expandAllBtn.style.display = "none";
+        }
+
+        if (thead) {
+          thead.innerHTML = `<tr>
+            <th style="width: 50px; text-align: center;">#</th>
+            <th style="text-align: left;">Company</th>
+            <th style="width: 90px; text-align: center;">Ticker</th>
+            <th style="width: 120px; text-align: right;">Market Cap</th>
+            <th style="text-align: left;">Insider Name &amp; Title</th>
+            <th style="width: 100px; text-align: right;">Trade Date</th>
+            <th style="width: 110px; text-align: right;">Shares</th>
+            <th style="width: 100px; text-align: right;">Price</th>
+            <th style="width: 130px; text-align: right;">Total Value</th>
+            <th style="width: 100px; text-align: center;">Source</th>
+            <th style="width: 120px; text-align: center;">Action</th>
+          </tr>`;
+        }
+
+        let html = "";
+        currentInsiderTrades.forEach((r, idx) => {
+          const issuerName = r.issuer_name || r.company || "Unknown";
+          const price = r.price_per_share !== undefined ? r.price_per_share : (r.price !== undefined ? r.price : 0);
+          const txnDate = r.transaction_date || r.filing_date || "—";
+          const shares = r.shares !== undefined ? r.shares : (r.amount !== undefined ? r.amount : 0);
+
+          const capStr = r.market_cap ? `$${(r.market_cap / 1e6).toFixed(0)}M` : "N/A";
+          const valStr = `$${r.total_value.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
+          const priceStr = `$${price.toFixed(2)}`;
+          const sharesStr = shares.toLocaleString(undefined, {maximumFractionDigits: 0});
+          const sourceLink = r.filing_url ? `<a class="link-sec" href="${r.filing_url}" target="_blank">Form 4 ↗</a>` : "—";
+          const actionBtn = `<button class="ib-btn ib-btn-secondary" onclick="analyzeTicker('${r.ticker}')">Analyze</button>`;
+          
+          const historyItem = history.find(h => h.ticker === r.ticker);
+          const lastViewedHtml = historyItem 
+            ? `<div style="font-size: 0.58rem; color: #0284c7; margin-top: 4px; font-weight: 500; white-space: nowrap;">👁️ ${fmtTime(historyItem.time)}</div>` 
+            : "";
+
+          html += `<tr>
+            <td style="text-align: center; color: #94a3b8; font-weight: 500;">${idx + 1}</td>
+            <td style="text-align: left; font-weight: 500;">${escapeHtml(issuerName)}</td>
+            <td style="text-align: center;">
+              <a class="badge-ticker" onclick="analyzeTicker('${r.ticker}')">${r.ticker}</a>
+              ${lastViewedHtml}
+            </td>
+            <td style="text-align: right; font-variant-numeric: tabular-nums;">${capStr}</td>
+            <td style="text-align: left;">
+              <div style="font-weight: 600; color: #0f172a;">${escapeHtml(r.insider_name || 'Unknown')}</div>
+              <div style="font-size: 0.65rem; color: #64748b;">${escapeHtml(r.insider_title || 'Insider')}</div>
+            </td>
+            <td style="text-align: right;">${txnDate}</td>
+            <td style="text-align: right; font-variant-numeric: tabular-nums;">${sharesStr}</td>
+            <td style="text-align: right; font-variant-numeric: tabular-nums;">${priceStr}</td>
+            <td style="text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; color: #16a34a;">${valStr}</td>
+            <td style="text-align: center;">${sourceLink}</td>
+            <td style="text-align: center;">${actionBtn}</td>
+          </tr>`;
+        });
+        tbody.innerHTML = html;
+      }
+    }
 
     function fetchInsiderBuys() {
       if (ibEventSource) {
@@ -1557,6 +2009,7 @@
       const progressText = document.getElementById("ib-progress-text");
       const tbody = document.getElementById("ib-table-body");
       const errorDiv = document.getElementById("ib-error");
+      const summaryBar = document.getElementById("ib-summary-bar");
       const btn = document.getElementById("ib-refresh-btn");
       if (!spinner || !tbody || !errorDiv || !btn) return;
       
@@ -1586,6 +2039,7 @@
         progressText.textContent = "Checking cache / fetching daily index...";
       }
       errorDiv.style.display = "none";
+      if (summaryBar) summaryBar.style.display = "none";
       btn.disabled = true;
       
       tbody.innerHTML = `<tr>
@@ -1618,61 +2072,9 @@
             btn.disabled = false;
             setLastChecked(Date.now());
             
-            const results = data.data.results;
-            if (!results || results.length === 0) {
-              tbody.innerHTML = `<tr>
-                <td colspan="11" class="empty-state" style="text-align: center; padding: 40px; color: #94a3b8;">
-                  No insider trades found matching your filters for this date/range.
-                </td>
-              </tr>`;
-              return;
-            }
-            
-            let history = [];
-            try {
-              history = JSON.parse(localStorage.getItem("financials_history") || "[]");
-            } catch(e) {}
-
-            let html = "";
-            results.forEach((r, idx) => {
-              const issuerName = r.issuer_name || r.company || "Unknown";
-              const price = r.price_per_share !== undefined ? r.price_per_share : (r.price !== undefined ? r.price : 0);
-              const txnDate = r.transaction_date || r.filing_date || "—";
-              const shares = r.shares !== undefined ? r.shares : (r.amount !== undefined ? r.amount : 0);
-
-              const capStr = r.market_cap ? `$${(r.market_cap / 1e6).toFixed(0)}M` : "N/A";
-              const valStr = `$${r.total_value.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
-              const priceStr = `$${price.toFixed(2)}`;
-              const sharesStr = shares.toLocaleString(undefined, {maximumFractionDigits: 0});
-              const sourceLink = r.filing_url ? `<a class="link-sec" href="${r.filing_url}" target="_blank">Form 4 ↗</a>` : "—";
-              const actionBtn = `<button class="ib-btn ib-btn-secondary" onclick="analyzeTicker('${r.ticker}')">Analyze</button>`;
-              
-              const historyItem = history.find(h => h.ticker === r.ticker);
-              const lastViewedHtml = historyItem 
-                ? `<div style="font-size: 0.58rem; color: #0284c7; margin-top: 4px; font-weight: 500; white-space: nowrap;">👁️ ${fmtTime(historyItem.time)}</div>` 
-                : "";
-
-              html += `<tr>
-                <td style="text-align: center; color: #94a3b8; font-weight: 500;">${idx + 1}</td>
-                <td style="font-weight: 500;">${issuerName}</td>
-                <td style="text-align: center;">
-                  <a class="badge-ticker" onclick="analyzeTicker('${r.ticker}')">${r.ticker}</a>
-                  ${lastViewedHtml}
-                </td>
-                <td style="text-align: right; font-variant-numeric: tabular-nums;">${capStr}</td>
-                <td>
-                  <div style="font-weight: 600; color: #0f172a;">${r.insider_name}</div>
-                  <div style="font-size: 0.65rem; color: #64748b;">${r.insider_title || 'Insider'}</div>
-                </td>
-                <td style="text-align: right;">${txnDate}</td>
-                <td style="text-align: right; font-variant-numeric: tabular-nums;">${sharesStr}</td>
-                <td style="text-align: right; font-variant-numeric: tabular-nums;">${priceStr}</td>
-                <td style="text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; color: #16a34a;">${valStr}</td>
-                <td style="text-align: center;">${sourceLink}</td>
-                <td style="text-align: center;">${actionBtn}</td>
-              </tr>`;
-            });
-            tbody.innerHTML = html;
+            currentInsiderTrades = data.data.results || [];
+            expandedTickerRows.clear();
+            renderInsiderBuysTable();
           } else if (data.type === "error") {
             ibEventSource.close();
             ibEventSource = null;

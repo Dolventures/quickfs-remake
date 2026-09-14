@@ -60,6 +60,9 @@ INCOME_CONCEPTS = {
         "CostOfGoodsAndServiceExcludingDepletionDepreciationAndAmortization",
         "CostOfServices",
     ],
+    "GrossProfit": [
+        "GrossProfit",
+    ],
     "OperatingExpenses": [
         "OperatingExpenses",
         "CostsAndExpenses",
@@ -167,6 +170,9 @@ INCOME_CONCEPTS_IFRS = {
     "CostOfSales": [
         "CostOfSales",
         "CostOfGoodsAndServicesRendered",
+    ],
+    "GrossProfit": [
+        "GrossProfit",
     ],
     "OperatingExpenses": [
         "OperatingExpense",
@@ -559,6 +565,14 @@ def _compute_ttm(raw: pd.DataFrame,
                           prior_ytd.get(metric))
 
     rev, cogs = _safe(inc.get("Revenue")), _safe(inc.get("CostOfSales"))
+    gp = _safe(inc.get("GrossProfit"))
+    if cogs is None and rev is not None and gp is not None:
+        cogs = rev - gp
+        inc["CostOfSales"] = cogs
+    elif gp is None and rev is not None and cogs is not None:
+        gp = rev - cogs
+        inc["GrossProfit"] = gp
+
     inc["GrossMargin"]    = ((rev - cogs) / rev * 100) if rev and cogs else None
     opinc                 = _safe(inc.get("OperatingIncome"))
     inc["OperatingMargin"] = (opinc / rev * 100) if opinc is not None and rev else None
@@ -646,6 +660,14 @@ def _post_process_pivots(income_pivot, bs_pivot, cf_pivot_full, frequency: str =
                 median_shares = shares.median()
                 mask = income_pivot["DilutedShares"] < (median_shares * 0.01)
                 income_pivot.loc[mask, "DilutedShares"] *= 1000
+
+        # Derive missing CostOfSales or GrossProfit when Revenue and counterpart exist
+        if "CostOfSales" in income_pivot.columns and "GrossProfit" in income_pivot.columns and "Revenue" in income_pivot.columns:
+            mask_cogs = income_pivot["CostOfSales"].isna() & income_pivot["Revenue"].notna() & income_pivot["GrossProfit"].notna()
+            income_pivot.loc[mask_cogs, "CostOfSales"] = income_pivot.loc[mask_cogs, "Revenue"] - income_pivot.loc[mask_cogs, "GrossProfit"]
+            
+            mask_gp = income_pivot["GrossProfit"].isna() & income_pivot["Revenue"].notna() & income_pivot["CostOfSales"].notna()
+            income_pivot.loc[mask_gp, "GrossProfit"] = income_pivot.loc[mask_gp, "Revenue"] - income_pivot.loc[mask_gp, "CostOfSales"]
 
         income_pivot["GrossMargin"] = (
             (income_pivot.get("Revenue", 0) - income_pivot.get("CostOfSales", 0))
@@ -791,10 +813,32 @@ def compute_summary_metrics(income_df, bs_df, cf_df, ttm, ticker):
         beta        = info.get("beta") or None
         avg_vol     = info.get("averageVolume") or None
         shares_out  = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding") or None
+
+        if not shares_out:
+            cash = info.get("totalCash")
+            cash_ps = info.get("totalCashPerShare")
+            rev = info.get("totalRevenue")
+            rev_ps = info.get("revenuePerShare")
+            if cash and cash_ps and cash_ps > 0:
+                shares_out = cash / cash_ps
+            elif rev and rev_ps and rev_ps > 0:
+                shares_out = rev / rev_ps
+            elif info.get("floatShares"):
+                shares_out = info.get("floatShares")
+            elif not income_df.empty and "DilutedShares" in income_df.columns:
+                ds_s = income_df.sort_values("period_end")["DilutedShares"].dropna()
+                if not ds_s.empty:
+                    shares_out = ds_s.iloc[-1]
+
         if not market_cap and share_price and shares_out:
             market_cap = share_price * shares_out
+        if not market_cap and info.get("enterpriseValue") and info.get("totalDebt") and info.get("totalCash"):
+            derived_cap = info.get("enterpriseValue") - info.get("totalDebt") + info.get("totalCash")
+            if derived_cap > 0:
+                market_cap = derived_cap
         if not shares_out and market_cap and share_price and share_price > 0:
             shares_out = market_cap / share_price
+
         share_turnover = (avg_vol * 252 / shares_out) if (avg_vol and shares_out) else None
     except Exception:
         market_cap = share_price = beta = share_turnover = None

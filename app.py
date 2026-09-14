@@ -118,7 +118,7 @@ def get_market_cap_cached(ticker):
         except Exception:
             pass
             
-    if ticker in caps:
+    if ticker in caps and caps[ticker] is not None:
         return caps[ticker]
         
     try:
@@ -127,8 +127,23 @@ def get_market_cap_cached(ticker):
         if not cap:
             price = info.get("currentPrice") or info.get("regularMarketPrice")
             shares = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+            if not shares:
+                cash = info.get("totalCash")
+                cash_ps = info.get("totalCashPerShare")
+                rev = info.get("totalRevenue")
+                rev_ps = info.get("revenuePerShare")
+                if cash and cash_ps and cash_ps > 0:
+                    shares = cash / cash_ps
+                elif rev and rev_ps and rev_ps > 0:
+                    shares = rev / rev_ps
+                elif info.get("floatShares"):
+                    shares = info.get("floatShares")
             if price and shares:
                 cap = price * shares
+            elif info.get("enterpriseValue") and info.get("totalDebt") and info.get("totalCash"):
+                derived_cap = info.get("enterpriseValue") - info.get("totalDebt") + info.get("totalCash")
+                if derived_cap > 0:
+                    cap = derived_cap
         cap_val = float(cap) if cap else None
         caps[ticker] = cap_val
         
