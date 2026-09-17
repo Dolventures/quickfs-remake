@@ -1002,6 +1002,8 @@
       { key: "LongTermDebt",       label: "Long-term Debt",       fmt: "dollar" },
       { key: "TotalDebt",          label: "Total Debt",           fmt: "dollar" },
       { key: "TotalLiabilities",   label: "Total Liabilities",    fmt: "dollar" },
+      { key: "PreferredStock",     label: "Preferred Stock",      fmt: "dollar" },
+      { key: "StockholdersEquity", label: "Stockholders' Equity", fmt: "dollar" },
       { key: "NetDebt",            label: "Net Debt",             fmt: "dollar" },
     ];
 
@@ -2133,8 +2135,15 @@
     const urlParams = new URLSearchParams(window.location.search);
     const tabParam = urlParams.get("tab");
     const dateParam = urlParams.get("date");
+    const tickerParam = urlParams.get("ticker");
     
-    if (tabParam === "insider-buys" && document.getElementById("nav-tabs")) {
+    if (tickerParam) {
+      const cleanTicker = tickerParam.trim().toUpperCase();
+      const tickerInput = document.getElementById("ticker-input");
+      if (tickerInput) tickerInput.value = cleanTicker;
+      switchTab("financials");
+      fetchFinancials(cleanTicker, G_FREQ);
+    } else if (tabParam === "insider-buys" && document.getElementById("nav-tabs")) {
       const dateInput = document.getElementById("ib-date");
       if (dateParam && dateInput) {
         dateInput.value = dateParam;

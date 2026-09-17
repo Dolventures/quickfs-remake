@@ -1,4 +1,6 @@
 import os
+import json
+import re
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -125,14 +127,39 @@ BALANCE_SHEET_CONCEPTS = {
         "LongTermDebtAndCapitalLeaseObligationsCurrent",
         "DebtCurrent",
         "NotesPayableCurrent",
+        "LoansPayableCurrent",
+        "SecuredDebtCurrent",
+        "LinesOfCreditCurrent",
         "ShortTermBorrowings",
         "CommercialPaper",
     ],
     "LongTermDebt": [
-        "LongTermDebt",
         "LongTermDebtNoncurrent",
+        "LongTermDebt",
         "LongTermNotesPayable",
         "LongTermDebtAndCapitalLeaseObligations",
+        "SeniorNotesNoncurrent",
+        "SeniorNotes",
+        "UnsecuredDebt",
+    ],
+    "SecuredDebt": [
+        "SecuredDebt",
+        "SecuredDebtNoncurrent",
+        "MortgagesPayable",
+        "MortgagesPayableNoncurrent",
+    ],
+    "LoansPayable": [
+        "LoansPayable",
+        "LoansPayableNoncurrent",
+    ],
+    "LineOfCredit": [
+        "LineOfCredit",
+        "LinesOfCreditCurrent",
+    ],
+    "BondsPayable": [
+        "UMH:SeriesABondsPayable",
+        "UMH:SeriesBBondsPayable",
+        "UMH:BondsPayable",
     ],
     "OperatingLeaseLiabilityNoncurrent": [
         "OperatingLeaseLiabilityNoncurrent",
@@ -147,6 +174,16 @@ BALANCE_SHEET_CONCEPTS = {
     "TotalLiabilitiesAndEquity": [
         "LiabilitiesAndStockholdersEquity",
         "LiabilitiesAndPartnersCapital",
+    ],
+    "PreferredStock": [
+        "PreferredStockValue",
+        "PreferredStockValueOutstanding",
+        "RedeemablePreferredStockCarryingAmount",
+        "TemporaryEquityCarryingAmountAttributableToParent",
+        "TemporaryEquityCarryingAmount",
+        "PreferredStockIncludingAdditionalPaidInCapitalNetOfDiscount",
+        "PreferredStockLiquidationPreferenceValue",
+        "UMH:SeriesDCumulativeRedeemablePreferredStockValue",
     ],
     "StockholdersEquity": [
         "StockholdersEquity",
@@ -247,6 +284,10 @@ BALANCE_SHEET_CONCEPTS_IFRS = {
     ],
     "TotalLiabilities": ["Liabilities"],
     "TotalLiabilitiesAndEquity": ["EquityAndLiabilities"],
+    "PreferredStock": [
+        "PreferenceShares",
+        "IssuedCapitalPreferenceShares",
+    ],
     "StockholdersEquity": [
         "EquityAttributableToOwnersOfParent",
         "Equity",
@@ -403,9 +444,9 @@ def _derive_quarterly_flow(df: pd.DataFrame) -> pd.DataFrame:
 def _build_from_concepts(df_raw, concepts: dict, ifrs_concepts: dict = None, frequency: str = "annual") -> pd.DataFrame:
     frames = []
     for metric, candidates in concepts.items():
-        prefixed = [f"us-gaap:{c}" for c in candidates]
+        prefixed = [c if ":" in c else f"us-gaap:{c}" for c in candidates]
         if ifrs_concepts and metric in ifrs_concepts:
-            prefixed += [f"ifrs-full:{c}" for c in ifrs_concepts[metric]]
+            prefixed += [c if ":" in c else f"ifrs-full:{c}" for c in ifrs_concepts[metric]]
         sub = df_raw[df_raw["concept"].isin(prefixed)].copy()
         if not sub.empty:
             concept_priority = {c: i for i, c in enumerate(prefixed)}
@@ -481,12 +522,12 @@ def _compute_ttm(raw: pd.DataFrame,
     all_flow_lookup = {**income_lookup, **cf_lookup}
 
     bs_lookup = {
-        f"us-gaap:{c}": metric
+        (c if ":" in c else f"us-gaap:{c}"): metric
         for metric, candidates in BALANCE_SHEET_CONCEPTS.items()
         for c in candidates
     }
     bs_lookup.update({
-        f"ifrs-full:{c}": metric
+        (c if ":" in c else f"ifrs-full:{c}"): metric
         for metric, candidates in BALANCE_SHEET_CONCEPTS_IFRS.items()
         for c in candidates
     })
@@ -635,10 +676,19 @@ def _compute_ttm(raw: pd.DataFrame,
 
         ltdebt  = bs.get("LongTermDebt") or 0
         stdebt  = bs.get("CurrentDebt") or 0
+        secdebt = bs.get("SecuredDebt") or 0
+        loans   = bs.get("LoansPayable") or 0
+        loc     = bs.get("LineOfCredit") or 0
+        bonds   = bs.get("BondsPayable") or 0
+        std_tot  = ltdebt + stdebt
+        comp_tot = secdebt + loans + loc + bonds
+        bs["TotalDebt"] = comp_tot if comp_tot > std_tot else std_tot
+        for k in ["SecuredDebt", "LoansPayable", "LineOfCredit", "BondsPayable"]:
+            bs.pop(k, None)
+
         ol_nc   = bs.get("OperatingLeaseLiabilityNoncurrent") or 0
         ol_cur  = bs.get("OperatingLeaseLiabilityCurrent") or 0
         cash    = bs.get("Cash") or 0
-        bs["TotalDebt"]                = ltdebt + stdebt
         bs["OperatingLeaseLiabilities"] = ol_nc + ol_cur
         bs["NetDebt"]                  = bs["TotalDebt"] - cash
 
@@ -695,7 +745,17 @@ def _post_process_pivots(income_pivot, bs_pivot, cf_pivot_full, frequency: str =
                 bs_pivot["TotalLiabilitiesAndEquity"] - bs_pivot["StockholdersEquity"]
             )
         bs_pivot.drop(columns=["TotalLiabilitiesAndEquity"], errors="ignore", inplace=True)
-        bs_pivot["TotalDebt"] = bs_pivot.get("LongTermDebt", 0).fillna(0) + bs_pivot.get("CurrentDebt", 0).fillna(0)
+        
+        std_debt = bs_pivot.get("LongTermDebt", 0).fillna(0) + bs_pivot.get("CurrentDebt", 0).fillna(0)
+        comp_debt = (
+            bs_pivot.get("SecuredDebt", 0).fillna(0)
+            + bs_pivot.get("LoansPayable", 0).fillna(0)
+            + bs_pivot.get("LineOfCredit", 0).fillna(0)
+            + bs_pivot.get("BondsPayable", 0).fillna(0)
+        )
+        bs_pivot["TotalDebt"] = np.where(comp_debt > std_debt, comp_debt, std_debt)
+        bs_pivot.drop(columns=["SecuredDebt", "LoansPayable", "LineOfCredit", "BondsPayable"], errors="ignore", inplace=True)
+        
         bs_pivot["OperatingLeaseLiabilities"] = (
             bs_pivot.get("OperatingLeaseLiabilityNoncurrent", 0).fillna(0)
             + bs_pivot.get("OperatingLeaseLiabilityCurrent", 0).fillna(0)
@@ -718,6 +778,92 @@ def _post_process_pivots(income_pivot, bs_pivot, cf_pivot_full, frequency: str =
     return income_pivot, bs_pivot, cf_pivot_full
 
 
+def _enrich_custom_facts(ticker: str, raw: pd.DataFrame) -> pd.DataFrame:
+    """Enriches raw facts with custom extension tags for filers that use custom tags for preferred stock or debt (e.g. UMH)."""
+    if raw.empty or not ticker:
+        return raw
+    ticker_upper = ticker.upper()
+    if ticker_upper != "UMH":
+        return raw
+
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, f"custom_facts_{ticker_upper}.json")
+
+    custom_records = []
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r") as f:
+                custom_records = json.load(f)
+        except Exception:
+            pass
+
+    if not custom_records:
+        try:
+            import urllib.request
+            from bs4 import BeautifulSoup
+            headers = {"User-Agent": os.getenv("EDGAR_USER_AGENT", "TickerFS user@tickerfs.com")}
+            sub_url = "https://data.sec.gov/submissions/CIK0000752642.json"
+            req = urllib.request.Request(sub_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                sub_data = json.loads(resp.read().decode("utf-8"))
+
+            recent = sub_data.get("filings", {}).get("recent", {})
+            seen_filings = 0
+            for i, form in enumerate(recent.get("form", [])):
+                if form in ["10-K", "10-Q"] and seen_filings < 8:
+                    seen_filings += 1
+                    accn = recent["accessionNumber"][i].replace("-", "")
+                    doc = recent["primaryDocument"][i]
+                    filing_date = recent["filingDate"][i]
+                    doc_url = f"https://www.sec.gov/Archives/edgar/data/752642/{accn}/{doc}"
+                    try:
+                        req_doc = urllib.request.Request(doc_url, headers=headers)
+                        with urllib.request.urlopen(req_doc, timeout=5) as d_resp:
+                            html = d_resp.read().decode("utf-8")
+                        soup = BeautifulSoup(html, "html.parser")
+                        for tag in soup.find_all(re.compile(r".*nonfraction.*", re.I)):
+                            name = tag.get("name", "")
+                            if any(w in name.lower() for w in ["preferredstockvalue", "bondspayable", "seriesd"]):
+                                val_str = tag.get_text().strip().replace(",", "")
+                                try:
+                                    val = float(val_str)
+                                    scale = int(tag.get("scale", "0"))
+                                    val = val * (10 ** scale)
+                                    ctx = tag.get("contextref", "")
+                                    m_date = re.search(r"20\d\d-\d\d-\d\d", ctx)
+                                    if m_date:
+                                        custom_records.append({
+                                            "concept": name,
+                                            "numeric_value": val,
+                                            "period_start": None,
+                                            "period_end": m_date.group(0),
+                                            "filing_date": filing_date,
+                                            "form_type": form,
+                                            "frame": None,
+                                        })
+                                except ValueError:
+                                    pass
+                    except Exception:
+                        pass
+            if custom_records:
+                try:
+                    with open(cache_file, "w") as f:
+                        json.dump(custom_records, f)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if custom_records:
+        df_custom = pd.DataFrame(custom_records).drop_duplicates(subset=["concept", "period_end", "form_type"])
+        df_custom["period_start"] = pd.to_datetime(df_custom["period_start"])
+        df_custom["period_end"]   = pd.to_datetime(df_custom["period_end"])
+        df_custom["filing_date"]  = pd.to_datetime(df_custom["filing_date"])
+        raw = pd.concat([raw, df_custom], ignore_index=True)
+    return raw
+
+
 # ── Main fetch ────────────────────────────────────────────────────────────────
 
 def fetch_all_financials(ticker: str, frequency: str = "annual", raw_facts=None):
@@ -730,6 +876,8 @@ def fetch_all_financials(ticker: str, frequency: str = "annual", raw_facts=None)
             raise ValueError(f"No facts found for ticker: {ticker}")
         raw = facts.to_dataframe(include_metadata=True)
     
+    raw = _enrich_custom_facts(ticker, raw)
+
     if frequency == "annual":
         flow_raw    = _filter_annual_flow(raw)
         instant_raw = _filter_annual_instant(raw)
@@ -881,17 +1029,19 @@ def compute_summary_metrics(income_df, bs_df, cf_df, ttm, ticker):
     if ttm and ttm.get("balance_sheet"):
         bs_for_ev  = ttm["balance_sheet"]
         totdebt_ev = _safe(bs_for_ev.get("TotalDebt")) or 0
+        pref_ev    = _safe(bs_for_ev.get("PreferredStock")) or 0
         ol_ev      = _safe(bs_for_ev.get("OperatingLeaseLiabilities")) or 0
         cash_ev    = _safe(bs_for_ev.get("Cash")) or 0
     elif not bs_df.empty:
         latest_bs  = bs_df.sort_values("period_end").iloc[-1]
         totdebt_ev = _safe(latest_bs.get("TotalDebt")) or 0
+        pref_ev    = _safe(latest_bs.get("PreferredStock")) or 0
         ol_ev      = _safe(latest_bs.get("OperatingLeaseLiabilities")) or 0
         cash_ev    = _safe(latest_bs.get("Cash")) or 0
     else:
-        totdebt_ev = ol_ev = cash_ev = 0
+        totdebt_ev = pref_ev = ol_ev = cash_ev = 0
 
-    ev_computed = (market_cap + totdebt_ev + ol_ev - cash_ev) if market_cap else None
+    ev_computed = (market_cap + totdebt_ev + pref_ev + ol_ev - cash_ev) if market_cap else None
     result["ev"] = ev_computed
     result["ev_to_sales"] = (ev_computed / rev_for_ev) if (ev_computed and rev_for_ev) else None
 
@@ -970,9 +1120,10 @@ def compute_summary_metrics(income_df, bs_df, cf_df, ttm, ticker):
             eq    = _safe(b_row.get("StockholdersEquity"))
             ta    = _safe(b_row.get("TotalAssets"))
             nd    = _safe(b_row.get("NetDebt"))
+            pref  = _safe(b_row.get("PreferredStock")) or 0
             if oi is not None and eq is not None and nd is not None:
                 tr = max(0.0, min(0.5, tx / pt)) if (tx is not None and pt and pt > 0) else 0.21
-                ic = eq + (nd or 0)
+                ic = eq + pref + (nd or 0)
                 if ic and ic != 0:
                     roic_vals.append(oi * (1 - tr) / ic * 100)
             if ni is not None and eq and eq != 0:
@@ -1008,7 +1159,7 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
             inc[c] = float("nan")
 
     bs_cols = ["_year", "Cash", "CurrentDebt", "LongTermDebt", "TotalDebt",
-               "OperatingLeaseLiabilities",
+               "OperatingLeaseLiabilities", "PreferredStock",
                "CurrentAssets", "TotalLiabilities", "TotalAssets", "StockholdersEquity", "NetDebt"]
     if not bs_df.empty:
         bs = with_year(bs_df)
@@ -1046,7 +1197,13 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
 
     merged["SharePrice"] = merged["_price"]
     merged["MarketCap"]  = merged["DilutedShares"] * merged["SharePrice"]
-    merged["EV"]         = merged["MarketCap"] + merged["TotalDebt"].fillna(0) + merged["OperatingLeaseLiabilities"].fillna(0) - merged["Cash"].fillna(0)
+    merged["EV"]         = (
+        merged["MarketCap"]
+        + merged["TotalDebt"].fillna(0)
+        + merged["PreferredStock"].fillna(0)
+        + merged["OperatingLeaseLiabilities"].fillna(0)
+        - merged["Cash"].fillna(0)
+    )
     merged["EVToSales"]  = merged["EV"] / merged["Revenue"]
     merged["EVToEBITDA"] = merged["EV"] / merged["EBITDA"]
     merged["FCFToEV"]    = merged["FreeCashFlow"] / merged["EV"] * 100
@@ -1058,7 +1215,12 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
 
     _tax_rate = (merged["TaxExpense"] / merged["PreTaxIncome"]).clip(0, 0.5)
     _nopat    = merged["OperatingIncome"] * (1 - _tax_rate.fillna(0.21))
-    _inv_cap  = merged["StockholdersEquity"] + merged["TotalDebt"].fillna(0) - merged["Cash"].fillna(0)
+    _inv_cap  = (
+        merged["StockholdersEquity"].fillna(0)
+        + merged["TotalDebt"].fillna(0)
+        + merged["PreferredStock"].fillna(0)
+        - merged["Cash"].fillna(0)
+    )
     merged["ROIC"] = _nopat / _inv_cap * 100
     merged["ROE"]  = merged["NetIncome"] / merged["StockholdersEquity"] * 100
     merged["ROA"]  = merged["NetIncome"] / merged["TotalAssets"] * 100

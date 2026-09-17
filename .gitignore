@@ -36,4 +36,6 @@ cache/
 
 # Local automation scripts
 public-companies-to-look-at/
+run_screener.py
+.agents/
 
