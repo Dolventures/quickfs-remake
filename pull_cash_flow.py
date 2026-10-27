@@ -402,34 +402,48 @@ def _derive_quarterly_flow(df: pd.DataFrame) -> pd.DataFrame:
                 elif 340 <= d <= 400: ytd[12] = (row["numeric_value"], row["period_end"], row)
             
             # Now derive missing quarters
-            # Q2 = 6m - 3m
+            is_avg_metric = (fact == "DilutedShares")
+
+            # Q2 = 6m - 3m (or 2*6m - 3m for weighted-average share counts)
             if 6 in ytd and 3 in ytd:
                 val6, end6, row6 = ytd[6]
                 val3, end3, row3 = ytd[3]
                 if explicit_3m[explicit_3m["period_end"] == end6].empty:
                     new_row = row6.copy()
-                    new_row["numeric_value"] = val6 - val3
+                    if is_avg_metric:
+                        derived = 2 * val6 - val3
+                        new_row["numeric_value"] = derived if derived > 0 else val6
+                    else:
+                        new_row["numeric_value"] = val6 - val3
                     # Set period_start to ~90 days before period_end to mark it as 3m
                     new_row["period_start"] = end6 - pd.DateOffset(days=90)
                     explicit_3m = pd.concat([explicit_3m, pd.DataFrame([new_row])], ignore_index=True)
             
-            # Q3 = 9m - 6m
+            # Q3 = 9m - 6m (or 3*9m - 2*6m for weighted-average share counts)
             if 9 in ytd and 6 in ytd:
                 val9, end9, row9 = ytd[9]
                 val6, end6, row6 = ytd[6]
                 if explicit_3m[explicit_3m["period_end"] == end9].empty:
                     new_row = row9.copy()
-                    new_row["numeric_value"] = val9 - val6
+                    if is_avg_metric:
+                        derived = 3 * val9 - 2 * val6
+                        new_row["numeric_value"] = derived if derived > 0 else val9
+                    else:
+                        new_row["numeric_value"] = val9 - val6
                     new_row["period_start"] = end9 - pd.DateOffset(days=90)
                     explicit_3m = pd.concat([explicit_3m, pd.DataFrame([new_row])], ignore_index=True)
 
-            # Q4 = 12m - 9m
+            # Q4 = 12m - 9m (or 4*12m - 3*9m for weighted-average share counts)
             if 12 in ytd and 9 in ytd:
                 val12, end12, row12 = ytd[12]
                 val9, end9, row9 = ytd[9]
                 if explicit_3m[explicit_3m["period_end"] == end12].empty:
                     new_row = row12.copy()
-                    new_row["numeric_value"] = val12 - val9
+                    if is_avg_metric:
+                        derived = 4 * val12 - 3 * val9
+                        new_row["numeric_value"] = derived if derived > 0 else val12
+                    else:
+                        new_row["numeric_value"] = val12 - val9
                     new_row["period_start"] = end12 - pd.DateOffset(days=90)
                     explicit_3m = pd.concat([explicit_3m, pd.DataFrame([new_row])], ignore_index=True)
 
@@ -553,9 +567,11 @@ def _compute_ttm(raw: pd.DataFrame,
         if latest_annual_end >= latest_q_end:
             return None
 
-    # YTD duration of the latest 10-Q (determines which quarter it is)
+    # YTD duration of the latest 10-Q (determines which quarter it is).
+    # Note: Q2/Q3 10-Qs report both 3m (~90d) and YTD (~180d/~270d) rows; pick the YTD cluster.
     latest_entries = q_flow[q_flow["period_end"] == latest_q_end]
-    ytd_dur = (latest_entries["period_end"] - latest_entries["period_start"]).dt.days.median()
+    max_dur = latest_entries["dur"].max()
+    ytd_dur = latest_entries[latest_entries["dur"] >= max_dur - 20]["dur"].median()
 
     def best_ytd(df, target_end, dur_tolerance=35):
         """Get deduplicated fact values for the period closest to target_end."""
@@ -601,9 +617,13 @@ def _compute_ttm(raw: pd.DataFrame,
     # ── Income statement TTM ──────────────────────────────────────────────────
     inc = {}
     for metric in INCOME_CONCEPTS:
-        inc[metric] = ttm(annual_income.get(metric),
-                          curr_ytd.get(metric),
-                          prior_ytd.get(metric))
+        if metric == "DilutedShares":
+            # Share count is a weighted average, not an additive flow
+            inc[metric] = _safe(curr_ytd.get(metric)) or _safe(annual_income.get(metric))
+        else:
+            inc[metric] = ttm(annual_income.get(metric),
+                              curr_ytd.get(metric),
+                              prior_ytd.get(metric))
 
     rev, cogs = _safe(inc.get("Revenue")), _safe(inc.get("CostOfSales"))
     gp = _safe(inc.get("GrossProfit"))
@@ -864,6 +884,161 @@ def _enrich_custom_facts(ticker: str, raw: pd.DataFrame) -> pd.DataFrame:
     return raw
 
 
+# ── Yahoo Finance caching & Stock Split adjustment ────────────────────────────
+
+import time as _time
+
+_YF_INFO_CACHE: dict[str, tuple[float, dict]] = {}
+_YF_HIST_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
+_YF_CACHE_TTL = 900  # 15 minutes
+
+
+def _get_yf_info(ticker: str) -> dict:
+    key = (ticker or "").upper()
+    now = _time.time()
+    if key in _YF_INFO_CACHE:
+        ts, data = _YF_INFO_CACHE[key]
+        if now - ts < _YF_CACHE_TTL and data:
+            return data
+    try:
+        info = yf.Ticker(key).info or {}
+        if info:
+            _YF_INFO_CACHE[key] = (now, info)
+        return info
+    except Exception:
+        return _YF_INFO_CACHE.get(key, (0, {}))[1]
+
+
+def _get_yf_history(ticker: str, start_date: str = "1995-01-01") -> pd.DataFrame:
+    key = (ticker or "").upper()
+    now = _time.time()
+    if key in _YF_HIST_CACHE:
+        ts, df = _YF_HIST_CACHE[key]
+        if now - ts < _YF_CACHE_TTL and not df.empty:
+            if pd.to_datetime(start_date) >= df.index.min() - pd.Timedelta(days=15):
+                return df
+    try:
+        hist = yf.Ticker(key).history(start=start_date, auto_adjust=False)
+        if hist is not None and not hist.empty:
+            if hist.index.tz is not None:
+                hist.index = hist.index.tz_convert(None)
+            _YF_HIST_CACHE[key] = (now, hist)
+            return hist
+    except Exception:
+        pass
+    return _YF_HIST_CACHE.get(key, (0, pd.DataFrame()))[1]
+
+
+def _infer_splits_from_edgar(raw: pd.DataFrame) -> pd.Series:
+    """
+    Fallback split detector: infers stock split ratios and approximate dates
+    by comparing comparative-period DilutedShares reported across consecutive
+    annual 10-K filings for the same fiscal year.
+    """
+    share_concepts = {
+        f"us-gaap:{c}" for c in INCOME_CONCEPTS["DilutedShares"]
+    } | {
+        f"ifrs-full:{c}" for c in INCOME_CONCEPTS_IFRS["DilutedShares"]
+    }
+    ds = raw[raw["concept"].isin(share_concepts) & raw["form_type"].isin(ANNUAL_FORMS)].copy()
+    if ds.empty:
+        return pd.Series(dtype=float)
+    ds = _filter_annual_flow(ds)
+    if ds.empty:
+        return pd.Series(dtype=float)
+    ds["year"] = ds["period_end"].dt.year
+    ds = ds.sort_values(["year", "filing_date"])
+
+    inferred = {}
+    for _, g in ds.groupby("year"):
+        g = g.drop_duplicates(subset=["filing_date"], keep="last").sort_values("filing_date")
+        if len(g) < 2:
+            continue
+        vals = g["numeric_value"].values
+        f_dates = g["filing_date"].values
+        for i in range(1, len(vals)):
+            v_prev, v_curr = vals[i - 1], vals[i]
+            if v_prev and v_prev > 0 and v_curr and v_curr > 0:
+                ratio = v_curr / v_prev
+                # Exclude ~1000x unit-reporting anomalies; capture genuine splits/reverse splits
+                if (1.25 <= ratio <= 50.0) or (0.02 <= ratio <= 0.8):
+                    rounded = round(ratio * 2) / 2 if ratio >= 1.25 else ratio
+                    if abs(ratio - rounded) / rounded < 0.03:
+                        ratio = rounded
+                    split_dt = pd.Timestamp(f_dates[i]) - pd.Timedelta(days=1)
+                    inferred[split_dt] = float(ratio)
+    if not inferred:
+        return pd.Series(dtype=float)
+    return pd.Series(inferred).sort_index()
+
+
+def _adjust_for_splits(ticker: str, raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adjusts historical DilutedShares and EPSDiluted in SEC EDGAR raw facts for
+    subsequent stock splits. SEC filings only restate comparative periods in
+    filings submitted after a split; older filings remain in pre-split units,
+    whereas historical stock prices from Yahoo Finance are split-adjusted.
+    """
+    if raw.empty or raw.attrs.get("_splits_adjusted"):
+        return raw
+
+    share_concepts = {
+        f"us-gaap:{c}" for c in INCOME_CONCEPTS["DilutedShares"]
+    } | {
+        f"ifrs-full:{c}" for c in INCOME_CONCEPTS_IFRS["DilutedShares"]
+    }
+    eps_concepts = {
+        f"us-gaap:{c}" for c in INCOME_CONCEPTS["EPSDiluted"]
+    } | {
+        f"ifrs-full:{c}" for c in INCOME_CONCEPTS_IFRS["EPSDiluted"]
+    }
+    target_mask = raw["concept"].isin(share_concepts | eps_concepts)
+    if not target_mask.any():
+        return raw
+
+    min_pe = pd.to_datetime(raw.loc[target_mask, "period_end"]).min()
+    start_str = (min_pe - pd.DateOffset(days=30)).strftime("%Y-%m-%d") if pd.notna(min_pe) else "1995-01-01"
+
+    splits = pd.Series(dtype=float)
+    hist = _get_yf_history(ticker, start_date=start_str)
+    if not hist.empty and "Stock Splits" in hist.columns:
+        splits = hist[hist["Stock Splits"] > 0]["Stock Splits"]
+
+    if splits.empty:
+        splits = _infer_splits_from_edgar(raw)
+
+    if splits.empty:
+        return raw
+
+    df = raw.copy()
+    filing_dates = pd.to_datetime(df.loc[target_mask, "filing_date"])
+    if filing_dates.dt.tz is not None:
+        filing_dates = filing_dates.dt.tz_convert(None)
+
+    factors = pd.Series(1.0, index=df.loc[target_mask].index)
+    for split_dt, ratio in splits.items():
+        if ratio and ratio > 0:
+            split_ts = pd.Timestamp(split_dt)
+            if split_ts.tz is not None:
+                split_ts = split_ts.tz_convert(None)
+            factors.loc[filing_dates < split_ts] *= float(ratio)
+
+    if (factors == 1.0).all():
+        return raw
+
+    is_shares = df["concept"].isin(share_concepts)
+    is_eps = df["concept"].isin(eps_concepts)
+
+    df.loc[target_mask & is_shares, "numeric_value"] = (
+        df.loc[target_mask & is_shares, "numeric_value"] * factors.loc[target_mask & is_shares]
+    )
+    df.loc[target_mask & is_eps, "numeric_value"] = (
+        df.loc[target_mask & is_eps, "numeric_value"] / factors.loc[target_mask & is_eps]
+    )
+    df.attrs["_splits_adjusted"] = True
+    return df
+
+
 # ── Main fetch ────────────────────────────────────────────────────────────────
 
 def fetch_all_financials(ticker: str, frequency: str = "annual", raw_facts=None):
@@ -877,6 +1052,7 @@ def fetch_all_financials(ticker: str, frequency: str = "annual", raw_facts=None)
         raw = facts.to_dataframe(include_metadata=True)
     
     raw = _enrich_custom_facts(ticker, raw)
+    raw = _adjust_for_splits(ticker, raw)
 
     if frequency == "annual":
         flow_raw    = _filter_annual_flow(raw)
@@ -955,7 +1131,7 @@ def _row_nearest_to_years_ago(df: pd.DataFrame, years: int):
 
 def compute_summary_metrics(income_df, bs_df, cf_df, ttm, ticker):
     try:
-        info        = yf.Ticker(ticker).info
+        info        = _get_yf_info(ticker)
         market_cap  = info.get("marketCap") or info.get("nonDilutedMarketCap") or None
         share_price = info.get("currentPrice") or info.get("regularMarketPrice") or None
         beta        = info.get("beta") or None
@@ -1180,18 +1356,17 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
     merged = inc.merge(bs, on="_year", how="left").merge(cf, on="_year", how="left")
 
     try:
-        hist = yf.Ticker(ticker).history(
-            start=(pd.to_datetime(merged["period_end"]).min() - pd.DateOffset(days=10)).strftime("%Y-%m-%d"),
-            end=(pd.to_datetime(merged["period_end"]).max() + pd.DateOffset(days=10)).strftime("%Y-%m-%d"),
-        )
-        hist.index = hist.index.tz_convert(None)
+        start_str = (pd.to_datetime(merged["period_end"]).min() - pd.DateOffset(days=10)).strftime("%Y-%m-%d")
+        hist = _get_yf_history(ticker, start_date=start_str)
+        if not hist.empty:
+            def price_near(date_str):
+                dt = pd.to_datetime(date_str)
+                diffs = np.abs((hist.index - dt).total_seconds())
+                return float(hist.iloc[diffs.argmin()]["Close"]) if len(diffs) > 0 else None
 
-        def price_near(date_str):
-            dt = pd.to_datetime(date_str)
-            diffs = np.abs((hist.index - dt).total_seconds())
-            return float(hist.iloc[diffs.argmin()]["Close"]) if len(diffs) > 0 else None
-
-        merged["_price"] = merged["period_end"].apply(price_near)
+            merged["_price"] = merged["period_end"].apply(price_near)
+        else:
+            merged["_price"] = None
     except Exception:
         merged["_price"] = None
 
@@ -1237,7 +1412,7 @@ def compute_annual_metrics(income_df, bs_df, cf_df, ttm, ticker):
     # Prepend TTM row if available
     if ttm:
         try:
-            info        = yf.Ticker(ticker).info
+            info        = _get_yf_info(ticker)
             market_cap  = info.get("marketCap") or info.get("nonDilutedMarketCap") or None
             share_price = info.get("currentPrice") or info.get("regularMarketPrice") or None
             if not market_cap and share_price:
